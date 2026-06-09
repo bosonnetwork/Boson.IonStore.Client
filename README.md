@@ -25,6 +25,7 @@ The client (`IonStore`) talks to the service over its HTTP API and, unlike a `We
   - [Federation](#federation)
 - [API Overview](#api-overview)
 - [Integrity](#integrity)
+- [Error Handling](#error-handling)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -232,7 +233,43 @@ Every payload retrieval is verified: the client hashes the streamed bytes (SHA-2
 - For an **`OutputStream`/`WriteStream`** sink, the destination cannot be rolled back: corrupt bytes may already have been written before the future fails.
 - Because the content id covers the whole object, **ranged downloads are intentionally not offered** — a partial body cannot be verified.
 
-Other failures surface as `IonStoreException`, which carries the HTTP status of a service error response, or `IonStoreException.NO_HTTP_STATUS` for transport/client-side errors.
+## Error Handling
+
+Failures surface as [`IonStoreException`](src/main/java/io/bosonnetwork/ionstore/exceptions/IonStoreException.java) or one of its category-specific subclasses in the [`exceptions`](src/main/java/io/bosonnetwork/ionstore/exceptions) package, so you can react by catching the specific type:
+
+| Exception | When |
+|---|---|
+| `UnauthorizedException` | Missing/invalid token (HTTP 401) — fix credentials |
+| `ForbiddenException` | Not permitted (HTTP 403) |
+| `TtlExceededException` | Requested TTL above the service maximum (HTTP 403) — lower the TTL |
+| `InvalidRequestException` | Malformed request / bad id / bad pagination (HTTP 400) |
+| `ObjectTooLargeException` | Payload above the service maximum (HTTP 413) — reduce size |
+| `QuotaExceededException` | Storage quota exhausted (HTTP 429) — free space or retry later |
+| `ObjectNotFoundException` | Object absent (HTTP 404) — *not* thrown by `get`/`exists`/`delete`, which return `null`/`false` |
+| `ObjectIntegrityException` | Content-id mismatch on download (or a service-side integrity error) |
+| `IonStoreIOException`, `IonStoreMetabaseException`, `IonStoreServerException`, `IonStoreInternalException` | Server-side faults |
+| `PeerNotFoundException`, `PeerRequestException`, `PeerResponseException` | Federation faults |
+
+Every exception preserves the response's details: `getStatus()` (the HTTP status, or `IonStoreException.NO_HTTP_STATUS` for transport/client-side errors), `getErrorCode()` (the service's stable numeric code, preserved even for an unrecognized category), `getMessage()` (the service message, with any federation peer detail appended), and `getNested()` (the remote peer's status/message for federation failures).
+
+Catch the **specific type** rather than branching on the HTTP status: a single status can map to more than one category — HTTP `403` is returned both for `ForbiddenException` and for `TtlExceededException`. An error category the client does not recognize (e.g. from a newer service) surfaces as a plain `IonStoreException` that still carries the original numeric code.
+
+```java
+try {
+    store.put(bytes, options).get();
+} catch (ExecutionException e) {
+    if (e.getCause() instanceof QuotaExceededException qe)
+        // free space or retry later
+    else if (e.getCause() instanceof ObjectTooLargeException te)
+        // reduce the payload size
+    else if (e.getCause() instanceof TtlExceededException tt)
+        // lower the requested TTL
+    else if (e.getCause() instanceof UnauthorizedException ue)
+        // fix credentials / token
+    else if (e.getCause() instanceof IonStoreException ise)
+        // ise.getStatus() / ise.getErrorCode() / ise.getMessage()
+}
+```
 
 ---
 

@@ -46,6 +46,13 @@ import org.junit.jupiter.api.Test;
 import io.bosonnetwork.Id;
 import io.bosonnetwork.crypto.Hash;
 import io.bosonnetwork.crypto.Signature;
+import io.bosonnetwork.ionstore.exceptions.ForbiddenException;
+import io.bosonnetwork.ionstore.exceptions.IonStoreException;
+import io.bosonnetwork.ionstore.exceptions.ObjectIntegrityException;
+import io.bosonnetwork.ionstore.exceptions.ObjectTooLargeException;
+import io.bosonnetwork.ionstore.exceptions.PeerResponseException;
+import io.bosonnetwork.ionstore.exceptions.QuotaExceededException;
+import io.bosonnetwork.ionstore.exceptions.TtlExceededException;
 
 /**
  * Unit tests for the {@link IonStore} client that exercise the download integrity check against a
@@ -59,6 +66,7 @@ class IonStoreClientTest {
 	private final Id goodId = Id.random();
 	private final Id badId = Id.random();
 	private final Id missingHeaderId = Id.random();
+	private final Id quotaId = Id.random();
 
 	private Vertx vertx;
 	private HttpServer server;
@@ -87,6 +95,14 @@ class IonStoreClientTest {
 				resp.end(Buffer.buffer(PAYLOAD));
 			} else if (id.equals(missingHeaderId.toString())) {
 				resp.end(Buffer.buffer(PAYLOAD)); // no Ion-Content-Id
+			} else if (id.equals(quotaId.toString())) {
+				JsonObject err = new JsonObject()
+						.put("type", "QUOTA_EXCEEDED")
+						.put("code", 5)
+						.put("message", "User quota exceeded: allowed 1048576, used 1048576");
+				resp.setStatusCode(429)
+						.putHeader("Content-Type", "application/json")
+						.end(err.toBuffer());
 			} else {
 				resp.setStatusCode(404).end();
 			}
@@ -147,6 +163,88 @@ class IonStoreClientTest {
 		BytesIonObject result = client.get(Id.random())
 				.toCompletableFuture().get(5, TimeUnit.SECONDS);
 		assertNull(result);
+	}
+
+	@Test
+	void serviceErrorResponseIsClassified() {
+		ExecutionException e = assertThrows(ExecutionException.class,
+				() -> client.getIonObject(quotaId).toCompletableFuture().get(5, TimeUnit.SECONDS));
+		QuotaExceededException ise = assertInstanceOf(QuotaExceededException.class, e.getCause());
+		assertEquals(429, ise.getStatus());
+		assertEquals(5, ise.getErrorCode());
+		assertEquals("User quota exceeded: allowed 1048576, used 1048576", ise.getMessage());
+	}
+
+	@Test
+	void fromResponseParsesTypeCodeAndMessage() {
+		Buffer body = new JsonObject()
+				.put("type", "OBJECT_TOO_LARGE").put("code", 4)
+				.put("message", "Object size limit exceeded: allowed 1024").toBuffer();
+		IonStoreException e = IonStoreException.fromResponse(413, body);
+		assertInstanceOf(ObjectTooLargeException.class, e);
+		assertEquals(413, e.getStatus());
+		assertEquals(4, e.getErrorCode());
+		assertEquals("Object size limit exceeded: allowed 1024", e.getMessage());
+	}
+
+	@Test
+	void fromResponseDisambiguatesForbiddenFromTtlExceeded() {
+		// HTTP 403 is shared by FORBIDDEN and TTL_EXCEEDED; the body's type/code is authoritative.
+		Buffer ttl = new JsonObject().put("type", "TTL_EXCEEDED").put("code", 6)
+				.put("message", "Object lifetime limit exceeded").toBuffer();
+		Buffer forbidden = new JsonObject().put("type", "FORBIDDEN").put("code", 2)
+				.put("message", "Forbidden").toBuffer();
+
+		assertInstanceOf(TtlExceededException.class, IonStoreException.fromResponse(403, ttl));
+		assertInstanceOf(ForbiddenException.class, IonStoreException.fromResponse(403, forbidden));
+	}
+
+	@Test
+	void fromResponseMapsAndAppendsFederationPeerDetail() {
+		Buffer body = new JsonObject()
+				.put("type", "PEER_RESPONSE_ERROR").put("code", 63)
+				.put("message", "Peer response error")
+				.put("nested", new JsonObject().put("statusCode", 404).put("message", "Object not found"))
+				.toBuffer();
+		IonStoreException e = IonStoreException.fromResponse(502, body);
+		PeerResponseException pre = assertInstanceOf(PeerResponseException.class, e);
+		assertEquals("peer responded HTTP 404: Object not found", pre.getNested());
+		assertTrue(pre.getMessage().contains("peer responded HTTP 404"));
+		assertTrue(pre.getMessage().contains("Object not found"));
+	}
+
+	@Test
+	void fromResponseResolvesUnknownTypeByCodeAndPreservesRawCode() {
+		// A category this client does not know by name, but whose numeric code is recognized.
+		Buffer knownCode = new JsonObject().put("type", "FUTURE_CATEGORY").put("code", 5)
+				.put("message", "quota").toBuffer();
+		assertInstanceOf(QuotaExceededException.class, IonStoreException.fromResponse(429, knownCode));
+
+		// Wholly unknown: surfaces as a plain IonStoreException, but the raw code is still preserved.
+		Buffer unknown = new JsonObject().put("type", "FUTURE_CATEGORY").put("code", 9999)
+				.put("message", "mystery").toBuffer();
+		IonStoreException e = IonStoreException.fromResponse(418, unknown);
+		assertEquals(IonStoreException.class, e.getClass());
+		assertEquals(9999, e.getErrorCode());
+		assertEquals("mystery", e.getMessage());
+	}
+
+	@Test
+	void fromResponseFallsBackForEmptyAndNonJsonBodies() {
+		IonStoreException empty = IonStoreException.fromResponse(500, Buffer.buffer());
+		assertEquals(IonStoreException.class, empty.getClass());
+		assertEquals(IonStoreException.NO_ERROR_CODE, empty.getErrorCode());
+		assertEquals("HTTP 500", empty.getMessage());
+
+		IonStoreException raw = IonStoreException.fromResponse(502, Buffer.buffer("upstream exploded"));
+		assertEquals("upstream exploded", raw.getMessage());
+	}
+
+	@Test
+	void integrityExceptionCarriesNoHttpStatus() {
+		ObjectIntegrityException e = new ObjectIntegrityException("hash mismatch");
+		assertEquals(11, e.getErrorCode()); // INTEGRITY_ERROR
+		assertEquals(IonStoreException.NO_HTTP_STATUS, e.getStatus());
 	}
 
 	@Test

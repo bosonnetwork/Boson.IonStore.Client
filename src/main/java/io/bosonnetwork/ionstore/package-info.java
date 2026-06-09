@@ -34,7 +34,7 @@
  * <h2>Integrity</h2>
  * Every payload download is verified: the client hashes the streamed bytes (SHA-256) and compares the
  * result against the content id the service advertises in the {@code Ion-Content-Id} header, failing
- * with {@link io.bosonnetwork.ionstore.ObjectIntegrityException} on any mismatch.
+ * with {@link io.bosonnetwork.ionstore.exceptions.ObjectIntegrityException} on any mismatch.
  *
  * <h2>Authentication</h2>
  * Object retrieval is permissionless; upload, list and delete are authenticated with short-lived
@@ -43,12 +43,16 @@
  * behalf of a user). Over HTTPS the service's self-signed certificate is pinned to its peer id.
  *
  * <h2>Errors</h2>
- * Failures are reported as {@link io.bosonnetwork.ionstore.IonStoreException}, which carries the HTTP
- * status of a service error response, or {@link io.bosonnetwork.ionstore.IonStoreException#NO_HTTP_STATUS}
- * for transport- or client-side failures (including integrity errors).
+ * Failures are reported as {@link io.bosonnetwork.ionstore.exceptions.IonStoreException} or one of its
+ * category-specific subclasses in {@link io.bosonnetwork.ionstore.exceptions} (for example
+ * {@link io.bosonnetwork.ionstore.exceptions.QuotaExceededException} or
+ * {@link io.bosonnetwork.ionstore.exceptions.TtlExceededException}), so callers can react by catching
+ * the specific type. Each exception preserves the HTTP status, the service's numeric error code, and a
+ * message; transport- or client-side failures (including integrity errors) carry
+ * {@link io.bosonnetwork.ionstore.exceptions.IonStoreException#NO_HTTP_STATUS}.
  *
  * @see io.bosonnetwork.ionstore.IonStore
  * @see io.bosonnetwork.ionstore.IonObject
- * @see io.bosonnetwork.ionstore.IonStoreException
+ * @see io.bosonnetwork.ionstore.exceptions.IonStoreException
  */
 package io.bosonnetwork.ionstore;

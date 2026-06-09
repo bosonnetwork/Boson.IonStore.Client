@@ -36,6 +36,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -72,6 +73,8 @@ import io.bosonnetwork.crypto.Hash;
 import io.bosonnetwork.crypto.HybridTrustManager;
 import io.bosonnetwork.crypto.Signature;
 import io.bosonnetwork.cwt.SignedCwt;
+import io.bosonnetwork.ionstore.exceptions.IonStoreException;
+import io.bosonnetwork.ionstore.exceptions.ObjectIntegrityException;
 import io.bosonnetwork.service.AccessScope;
 import io.bosonnetwork.utils.Base58;
 import io.bosonnetwork.utils.Hex;
@@ -85,7 +88,7 @@ import io.bosonnetwork.web.PaginatedResult;
  * A streaming client for a Boson Ion Store service: a content-addressed, deduplicated binary object
  * store.
  * <p>
- * The client uploads, downloads, lists and deletes objects over the service's HTTP API. It is built
+ * The client uploads, downloads, lists, and deletes objects over the service's HTTP API. It is built
  * on the lower-level Vert.x {@link HttpClient} rather than the {@code WebClient} so that
  * arbitrary-size payloads are streamed incrementally instead of being buffered whole in memory.
  *
@@ -97,7 +100,7 @@ import io.bosonnetwork.web.PaginatedResult;
  * cannot be verified.
  *
  * <h2>Authentication</h2>
- * Object retrieval is permissionless and sends no token. Upload, list and delete carry a short-lived
+ * Object retrieval is permissionless and sends no token. Upload, list, and delete carry a short-lived
  * {@link SignedCwt CWT} bearer token, minted in one of two mutually exclusive modes selected at build
  * time: <b>user-key mode</b> ({@link Builder#userKey}) or <b>device mode</b> ({@link Builder#userId}
  * + {@link Builder#deviceKey}). Over HTTPS the service's self-signed certificate is pinned to its
@@ -391,7 +394,7 @@ public class IonStore {
 					// Close the source file once the upload settles, then propagate its original outcome.
 					Future<IonObject> upload = upload(af, length, effective);
 					return upload.transform(ar -> af.close().transform(x -> ar.succeeded() ?
-							Future.succeededFuture(ar.result()) : Future.<IonObject>failedFuture(ar.cause())));
+							Future.succeededFuture(ar.result()) : Future.failedFuture(ar.cause())));
 				});
 
 		return ContextualFuture.of(future);
@@ -481,7 +484,7 @@ public class IonStore {
 	}
 
 	/**
-	 * Retrieves an object, streaming the integrity-verified payload to the given write stream.
+	 * Retrieves an object, streaming the integrity-verified payload to the given WriteStream.
 	 * <p>
 	 * The destination is ended when the transfer completes. The returned metadata is derived from the
 	 * response headers (its {@code name}/{@code contentType} may be {@code null} if the service did not
@@ -500,7 +503,7 @@ public class IonStore {
 
 	/**
 	 * Retrieves an object held by a remote peer (federation), streaming the integrity-verified payload
-	 * to the given write stream. The bound service fetches and caches the object from the named peer.
+	 * to the given WriteStream. The bound service fetches and caches the object from the named peer.
 	 *
 	 * @param peerId the peer id of the Ion Store node holding the object (must not be {@code null})
 	 * @param id     the object reference id (must not be {@code null})
@@ -586,10 +589,10 @@ public class IonStore {
 		return vertx.fileSystem()
 				.open(fp, new OpenOptions().setWrite(true).setCreate(true).setTruncateExisting(true))
 				.compose(af -> download(uri, ownerPeerId, id, af)
-						.recover(e -> closeAndDelete(af, fp).transform(x -> Future.<IonObject>failedFuture(e)))
+						.recover(e -> closeAndDelete(af, fp).transform(x -> Future.failedFuture(e)))
 						.compose(meta -> meta != null ?
 								Future.succeededFuture(meta) :
-								closeAndDelete(af, fp).map(v -> (IonObject) null)));
+								closeAndDelete(af, fp).mapEmpty()));
 	}
 
 	// Streams the verified payload to dst. On HTTP 200 the content is hashed while piping and checked
@@ -627,7 +630,7 @@ public class IonStore {
 									ionObjectFromHeaders(ownerPeerId, id, response, size.get()));
 						});
 					} else if (statusCode == 404) {
-						return response.body().map(b -> (IonObject) null);
+						return Future.succeededFuture();
 					} else {
 						return failFromResponse(response);
 					}
@@ -648,7 +651,7 @@ public class IonStore {
 			expireAt = 0;
 		}
 
-		Map<String, Object> metadata = new java.util.HashMap<>();
+		Map<String, Object> metadata = new HashMap<>();
 		response.headers().forEach(e -> {
 			if (e.getKey().regionMatches(true, 0, ION_HEADER_PREFIX, 0, ION_HEADER_PREFIX.length()) && !isReserved(e.getKey()))
 				metadata.put(e.getKey(), e.getValue());
@@ -679,11 +682,11 @@ public class IonStore {
 							try {
 								return Future.succeededFuture(IonObject.fromJson(new JsonObject(buf)));
 							} catch (Exception e) {
-								return Future.<IonObject>failedFuture(new IonStoreException("Malformed metadata response", e));
+								return Future.failedFuture(new IonStoreException("Malformed metadata response", e));
 							}
 						});
 					} else if (response.statusCode() == 404) {
-						return response.body().map(b -> (IonObject) null);
+						return Future.succeededFuture();
 					} else {
 						return failFromResponse(response);
 					}
@@ -752,7 +755,7 @@ public class IonStore {
 										body.getLong("page", page), body.getLong("pageSize", pageSize),
 										body.getLong("totalItems", (long) result.size()), result));
 							} catch (Exception e) {
-								return Future.<PaginatedResult<IonObject>>failedFuture(new IonStoreException("Malformed list response", e));
+								return Future.failedFuture(new IonStoreException("Malformed list response", e));
 							}
 						});
 					} else {
@@ -826,6 +829,7 @@ public class IonStore {
 		return tc.token;
 	}
 
+	@SuppressWarnings("BooleanMethodIsAlwaysInverted")
 	private static boolean isReserved(String name) {
 		return name.equalsIgnoreCase(ION_TTL) || name.equalsIgnoreCase(ION_ENCRYPTED)
 				|| name.equalsIgnoreCase(ION_EXPIRE_AT) || name.equalsIgnoreCase(ION_CONTENT_ID);
@@ -836,43 +840,44 @@ public class IonStore {
 		return response.body().transform(ar -> Future.failedFuture(error));
 	}
 
-	// Reads the error body, extracts the service Error message (or the raw body), logs it and fails.
+	// Reads the error body, parses the service Error payload (type/code/message/nested) into a
+	// classified IonStoreException, logs it at a level appropriate to the status, and fails.
 	private static <T> Future<T> failFromResponse(HttpClientResponse response) {
 		int statusCode = response.statusCode();
 		return response.body().transform(ar -> {
-			String message = null;
-			if (ar.succeeded() && ar.result() != null && ar.result().length() > 0) {
-				Buffer body = ar.result();
-				try {
-					message = new JsonObject(body).getString("message");
-				} catch (Exception ignore) {
-					// not JSON; fall back to the raw body
-				}
-				if (message == null || message.isEmpty())
-					message = body.toString(StandardCharsets.UTF_8);
-			}
-			if (message == null || message.isEmpty())
-				message = "HTTP " + statusCode;
+			Buffer body = ar.succeeded() ? ar.result() : null;
+			IonStoreException error = IonStoreException.fromResponse(statusCode, body);
 
-			if (statusCode == 401 || statusCode == 404 || statusCode == 429)
-				log.debug("Ion-Store request failed: {} - {}", statusCode, message);
+			// Client-correctable conditions (bad request, auth, not found, too large, quota/TTL) are
+			// expected and logged at debug; everything else (5xx, federation faults) at error level.
+			// The exception's concrete type names the error category.
+			if (statusCode >= 400 && statusCode < 500)
+				log.debug("Ion-Store request failed: {} [{}/{}] - {}", statusCode,
+						error.getClass().getSimpleName(), error.getErrorCode(), error.getMessage());
 			else
-				log.error("Ion-Store request failed: {} - {}", statusCode, message);
+				log.error("Ion-Store request failed: {} [{}/{}] - {}", statusCode,
+						error.getClass().getSimpleName(), error.getErrorCode(), error.getMessage());
 
-			return Future.failedFuture(new IonStoreException(statusCode, message));
+			return Future.failedFuture(error);
 		});
 	}
 
 	private static <T> Future<T> wrapError(Throwable e) {
+		// An IonStoreException is already classified and (for HTTP errors) already logged by
+		// failFromResponse, so pass it through untouched to avoid duplicate, noisy logging.
+		if (e instanceof IonStoreException ise)
+			return Future.failedFuture(ise);
+
+		// Anything else is an unexpected transport- or client-side failure (connection/TLS error,
+		// malformed response, ...): log it at error and wrap it with no HTTP status.
 		log.error("Ion-Store request failed: {}", e.getMessage(), e);
-		return Future.failedFuture(e instanceof IonStoreException ise ? ise :
-				new IonStoreException("Ion-Store request failed: " + e.getMessage(), e));
+		return Future.failedFuture(new IonStoreException("Ion-Store request failed: " + e.getMessage(), e));
 	}
 
 	private Future<Void> closeAndDelete(AsyncFile af, String file) {
 		return af.close()
 				.transform(x -> vertx.fileSystem().delete(file))
-				.transform(x -> Future.<Void>succeededFuture());
+				.transform(x -> Future.succeededFuture());
 	}
 
 	// Builds a Content-Disposition value: an ASCII-sanitized filename plus an RFC 5987 filename* form

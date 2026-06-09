@@ -20,25 +20,24 @@
  * SOFTWARE.
  */
 
-package io.bosonnetwork.ionstore;
+package io.bosonnetwork.ionstore.exceptions;
 
 /**
- * Thrown when a downloaded object fails its integrity check: the SHA-256 of the received bytes does
- * not match the content id the service advertised in the {@code Ion-Content-Id} header (or that
- * header is missing or malformed).
- * <p>
- * This is a client-side verification failure, so it carries {@link #NO_HTTP_STATUS} even though it is
- * raised while handling a {@code 200} response.
+ * Thrown when the request is authenticated but not permitted; HTTP {@code 403}. This status is shared
+ * with {@link TtlExceededException}, which the client distinguishes by the service error code; catch the
+ * specific type rather than branching on the status.
  */
-public class ObjectIntegrityException extends IonStoreException {
-	private static final long serialVersionUID = 5894994639001863871L;
+public class ForbiddenException extends IonStoreException {
+	private static final long serialVersionUID = -547443085222037931L;
 
 	/**
-	 * Creates an integrity exception with the given detail message.
+	 * Creates a {@code ForbiddenException} from a service error response.
 	 *
+	 * @param status  the HTTP status code returned by the service
 	 * @param message the detail message
+	 * @param nested  a description of the nested federation error, or {@code null}
 	 */
-	public ObjectIntegrityException(String message) {
-		super(message);
+	public ForbiddenException(int status, String message, String nested) {
+		super(status, IonStoreError.FORBIDDEN.getCode(), message, nested);
 	}
 }

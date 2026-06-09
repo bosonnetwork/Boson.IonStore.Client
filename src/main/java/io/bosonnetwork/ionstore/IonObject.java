@@ -23,6 +23,7 @@
 package io.bosonnetwork.ionstore;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
@@ -190,7 +191,7 @@ public class IonObject {
 
 		// Preserve the metadata values as-is (the service models metadata as Map<String, Object>).
 		JsonObject meta = json.getJsonObject("metadata");
-		Map<String, Object> metadata = meta == null ? null : new java.util.HashMap<>(meta.getMap());
+		Map<String, Object> metadata = meta == null ? null : new HashMap<>(meta.getMap());
 
 		return new IonObject(id, contentId, name, size, contentType, encrypted, expireAt, metadata, uri);
 	}
