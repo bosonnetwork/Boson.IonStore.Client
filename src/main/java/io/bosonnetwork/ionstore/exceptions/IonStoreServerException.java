@@ -23,9 +23,8 @@
 package io.bosonnetwork.ionstore.exceptions;
 
 /**
- * Thrown for a generic, unclassified server-side failure ({@code SERVER_ERROR}). Distinct from
- * {@link IonStoreInternalException}, which the service reports for an internal error with no more
- * specific category.
+ * Thrown for a generic server-side failure ({@code SERVER_ERROR}); HTTP {@code 500}. This is also the
+ * catch-all the service reports for an unexpected internal error that has no more specific category.
  */
 public class IonStoreServerException extends IonStoreException {
 	private static final long serialVersionUID = -3198763326488194010L;

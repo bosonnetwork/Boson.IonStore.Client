@@ -26,17 +26,17 @@ package io.bosonnetwork.ionstore.exceptions;
  * Thrown when the service's metadata store (the "metabase") fails while serving the request (a
  * server-side fault).
  */
-public class IonStoreMetabaseException extends IonStoreException {
+public class MetabaseException extends IonStoreException {
 	private static final long serialVersionUID = 183677745440150759L;
 
 	/**
-	 * Creates an {@code IonStoreMetabaseException} from a service error response.
+	 * Creates a {@code MetabaseException} from a service error response.
 	 *
 	 * @param status  the HTTP status code returned by the service
 	 * @param message the detail message
 	 * @param nested  a description of the nested federation error, or {@code null}
 	 */
-	public IonStoreMetabaseException(int status, String message, String nested) {
+	public MetabaseException(int status, String message, String nested) {
 		super(status, IonStoreError.METABASE_ERROR.getCode(), message, nested);
 	}
 }

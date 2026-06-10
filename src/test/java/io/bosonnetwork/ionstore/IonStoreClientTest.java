@@ -98,9 +98,9 @@ class IonStoreClientTest {
 			} else if (id.equals(quotaId.toString())) {
 				JsonObject err = new JsonObject()
 						.put("type", "QUOTA_EXCEEDED")
-						.put("code", 5)
+						.put("code", 23)
 						.put("message", "User quota exceeded: allowed 1048576, used 1048576");
-				resp.setStatusCode(429)
+				resp.setStatusCode(507)
 						.putHeader("Content-Type", "application/json")
 						.end(err.toBuffer());
 			} else {
@@ -170,29 +170,29 @@ class IonStoreClientTest {
 		ExecutionException e = assertThrows(ExecutionException.class,
 				() -> client.getIonObject(quotaId).toCompletableFuture().get(5, TimeUnit.SECONDS));
 		QuotaExceededException ise = assertInstanceOf(QuotaExceededException.class, e.getCause());
-		assertEquals(429, ise.getStatus());
-		assertEquals(5, ise.getErrorCode());
+		assertEquals(507, ise.getStatus());
+		assertEquals(23, ise.getErrorCode());
 		assertEquals("User quota exceeded: allowed 1048576, used 1048576", ise.getMessage());
 	}
 
 	@Test
 	void fromResponseParsesTypeCodeAndMessage() {
 		Buffer body = new JsonObject()
-				.put("type", "OBJECT_TOO_LARGE").put("code", 4)
+				.put("type", "OBJECT_TOO_LARGE").put("code", 21)
 				.put("message", "Object size limit exceeded: allowed 1024").toBuffer();
 		IonStoreException e = IonStoreException.fromResponse(413, body);
 		assertInstanceOf(ObjectTooLargeException.class, e);
 		assertEquals(413, e.getStatus());
-		assertEquals(4, e.getErrorCode());
+		assertEquals(21, e.getErrorCode());
 		assertEquals("Object size limit exceeded: allowed 1024", e.getMessage());
 	}
 
 	@Test
 	void fromResponseDisambiguatesForbiddenFromTtlExceeded() {
 		// HTTP 403 is shared by FORBIDDEN and TTL_EXCEEDED; the body's type/code is authoritative.
-		Buffer ttl = new JsonObject().put("type", "TTL_EXCEEDED").put("code", 6)
+		Buffer ttl = new JsonObject().put("type", "TTL_EXCEEDED").put("code", 22)
 				.put("message", "Object lifetime limit exceeded").toBuffer();
-		Buffer forbidden = new JsonObject().put("type", "FORBIDDEN").put("code", 2)
+		Buffer forbidden = new JsonObject().put("type", "FORBIDDEN").put("code", 12)
 				.put("message", "Forbidden").toBuffer();
 
 		assertInstanceOf(TtlExceededException.class, IonStoreException.fromResponse(403, ttl));
@@ -202,7 +202,7 @@ class IonStoreClientTest {
 	@Test
 	void fromResponseMapsAndAppendsFederationPeerDetail() {
 		Buffer body = new JsonObject()
-				.put("type", "PEER_RESPONSE_ERROR").put("code", 63)
+				.put("type", "PEER_RESPONSE_ERROR").put("code", 42)
 				.put("message", "Peer response error")
 				.put("nested", new JsonObject().put("statusCode", 404).put("message", "Object not found"))
 				.toBuffer();
@@ -211,14 +211,17 @@ class IonStoreClientTest {
 		assertEquals("peer responded HTTP 404: Object not found", pre.getNested());
 		assertTrue(pre.getMessage().contains("peer responded HTTP 404"));
 		assertTrue(pre.getMessage().contains("Object not found"));
+		// structured peer detail is also exposed directly
+		assertEquals(404, pre.getPeerStatus());
+		assertEquals("Object not found", pre.getPeerMessage());
 	}
 
 	@Test
 	void fromResponseResolvesUnknownTypeByCodeAndPreservesRawCode() {
 		// A category this client does not know by name, but whose numeric code is recognized.
-		Buffer knownCode = new JsonObject().put("type", "FUTURE_CATEGORY").put("code", 5)
+		Buffer knownCode = new JsonObject().put("type", "FUTURE_CATEGORY").put("code", 23)
 				.put("message", "quota").toBuffer();
-		assertInstanceOf(QuotaExceededException.class, IonStoreException.fromResponse(429, knownCode));
+		assertInstanceOf(QuotaExceededException.class, IonStoreException.fromResponse(507, knownCode));
 
 		// Wholly unknown: surfaces as a plain IonStoreException, but the raw code is still preserved.
 		Buffer unknown = new JsonObject().put("type", "FUTURE_CATEGORY").put("code", 9999)
@@ -243,7 +246,7 @@ class IonStoreClientTest {
 	@Test
 	void integrityExceptionCarriesNoHttpStatus() {
 		ObjectIntegrityException e = new ObjectIntegrityException("hash mismatch");
-		assertEquals(11, e.getErrorCode()); // INTEGRITY_ERROR
+		assertEquals(25, e.getErrorCode()); // INTEGRITY_ERROR
 		assertEquals(IonStoreException.NO_HTTP_STATUS, e.getStatus());
 	}
 

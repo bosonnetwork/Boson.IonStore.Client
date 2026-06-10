@@ -244,11 +244,11 @@ Failures surface as [`IonStoreException`](src/main/java/io/bosonnetwork/ionstore
 | `TtlExceededException` | Requested TTL above the service maximum (HTTP 403) — lower the TTL |
 | `InvalidRequestException` | Malformed request / bad id / bad pagination (HTTP 400) |
 | `ObjectTooLargeException` | Payload above the service maximum (HTTP 413) — reduce size |
-| `QuotaExceededException` | Storage quota exhausted (HTTP 429) — free space or retry later |
+| `QuotaExceededException` | Storage quota exhausted (HTTP 507) — free space or retry later |
 | `ObjectNotFoundException` | Object absent (HTTP 404) — *not* thrown by `get`/`exists`/`delete`, which return `null`/`false` |
-| `ObjectIntegrityException` | Content-id mismatch on download (or a service-side integrity error) |
-| `IonStoreIOException`, `IonStoreMetabaseException`, `IonStoreServerException`, `IonStoreInternalException` | Server-side faults |
-| `PeerNotFoundException`, `PeerRequestException`, `PeerResponseException` | Federation faults |
+| `ObjectIntegrityException` | Content-id mismatch on download (or a service-side integrity error, HTTP 422) |
+| `IonStoreIOException`, `MetabaseException`, `IonStoreServerException` | Server-side faults (HTTP 500) |
+| `PeerNotFoundException`, `PeerRequestException`, `PeerResponseException` | Federation faults (HTTP 502) |
 
 Every exception preserves the response's details: `getStatus()` (the HTTP status, or `IonStoreException.NO_HTTP_STATUS` for transport/client-side errors), `getErrorCode()` (the service's stable numeric code, preserved even for an unrecognized category), `getMessage()` (the service message, with any federation peer detail appended), and `getNested()` (the remote peer's status/message for federation failures).
 

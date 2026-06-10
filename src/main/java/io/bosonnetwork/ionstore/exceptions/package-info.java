@@ -27,21 +27,20 @@
  * the service reports is mapped to a dedicated subclass, so callers can react by catching the specific
  * type instead of inspecting a status code:
  * <ul>
+ *   <li>{@link io.bosonnetwork.ionstore.exceptions.InvalidRequestException} — HTTP {@code 400}</li>
  *   <li>{@link io.bosonnetwork.ionstore.exceptions.UnauthorizedException} — HTTP {@code 401}</li>
  *   <li>{@link io.bosonnetwork.ionstore.exceptions.ForbiddenException} — HTTP {@code 403}</li>
- *   <li>{@link io.bosonnetwork.ionstore.exceptions.TtlExceededException} — HTTP {@code 403} (TTL cap)</li>
- *   <li>{@link io.bosonnetwork.ionstore.exceptions.InvalidRequestException} — HTTP {@code 400}</li>
- *   <li>{@link io.bosonnetwork.ionstore.exceptions.ObjectTooLargeException} — HTTP {@code 413}</li>
- *   <li>{@link io.bosonnetwork.ionstore.exceptions.QuotaExceededException} — HTTP {@code 429}</li>
  *   <li>{@link io.bosonnetwork.ionstore.exceptions.ObjectNotFoundException} — HTTP {@code 404}</li>
- *   <li>{@link io.bosonnetwork.ionstore.exceptions.ObjectIntegrityException} — content-id mismatch</li>
+ *   <li>{@link io.bosonnetwork.ionstore.exceptions.ObjectTooLargeException} — HTTP {@code 413}</li>
+ *   <li>{@link io.bosonnetwork.ionstore.exceptions.TtlExceededException} — HTTP {@code 403} (TTL cap)</li>
+ *   <li>{@link io.bosonnetwork.ionstore.exceptions.QuotaExceededException} — HTTP {@code 507}</li>
+ *   <li>{@link io.bosonnetwork.ionstore.exceptions.ObjectIntegrityException} — content-id mismatch, HTTP {@code 422}</li>
  *   <li>{@link io.bosonnetwork.ionstore.exceptions.IonStoreIOException},
- *       {@link io.bosonnetwork.ionstore.exceptions.IonStoreMetabaseException},
- *       {@link io.bosonnetwork.ionstore.exceptions.IonStoreServerException},
- *       {@link io.bosonnetwork.ionstore.exceptions.IonStoreInternalException} — server-side faults</li>
+ *       {@link io.bosonnetwork.ionstore.exceptions.MetabaseException},
+ *       {@link io.bosonnetwork.ionstore.exceptions.IonStoreServerException} — server-side faults, HTTP {@code 500}</li>
  *   <li>{@link io.bosonnetwork.ionstore.exceptions.PeerNotFoundException},
  *       {@link io.bosonnetwork.ionstore.exceptions.PeerRequestException},
- *       {@link io.bosonnetwork.ionstore.exceptions.PeerResponseException} — federation faults</li>
+ *       {@link io.bosonnetwork.ionstore.exceptions.PeerResponseException} — federation faults, HTTP {@code 502}</li>
  * </ul>
  * Catching by type is preferable to branching on the HTTP status, since a single status can map to more
  * than one category (HTTP {@code 403} covers both {@code ForbiddenException} and

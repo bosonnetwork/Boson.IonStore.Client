@@ -149,6 +149,7 @@ public class IonStoreException extends BosonException {
 		int code = NO_ERROR_CODE;
 		String message = null;
 		String nested = null;
+		JsonObject nestedJson = null;
 
 		if (body != null && body.length() > 0) {
 			try {
@@ -156,7 +157,8 @@ public class IonStoreException extends BosonException {
 				type = json.getString("type");
 				code = json.getInteger("code", NO_ERROR_CODE);
 				message = json.getString("message");
-				nested = describeNested(json.getJsonObject("nested"));
+				nestedJson = json.getJsonObject("nested");
+				nested = describeNested(nestedJson);
 			} catch (RuntimeException ignore) {
 				// not the expected Error JSON; fall back to the raw body as the message below
 			}
@@ -173,23 +175,47 @@ public class IonStoreException extends BosonException {
 		String displayMessage = nested == null ? message : message + " (" + nested + ")";
 
 		return switch (error) {
+			case INVALID_REQUEST -> new InvalidRequestException(status, displayMessage, nested);
 			case UNAUTHORIZED -> new UnauthorizedException(status, displayMessage, nested);
 			case FORBIDDEN -> new ForbiddenException(status, displayMessage, nested);
-			case INVALID_REQUEST -> new InvalidRequestException(status, displayMessage, nested);
-			case OBJECT_TOO_LARGE -> new ObjectTooLargeException(status, displayMessage, nested);
-			case QUOTA_EXCEEDED -> new QuotaExceededException(status, displayMessage, nested);
-			case TTL_EXCEEDED -> new TtlExceededException(status, displayMessage, nested);
 			case OBJECT_NOT_FOUND -> new ObjectNotFoundException(status, displayMessage, nested);
-			case IO_ERROR -> new IonStoreIOException(status, displayMessage, nested);
-			case METABASE_ERROR -> new IonStoreMetabaseException(status, displayMessage, nested);
-			case SERVER_ERROR -> new IonStoreServerException(status, displayMessage, nested);
+			case OBJECT_TOO_LARGE -> new ObjectTooLargeException(status, displayMessage, nested);
+			case TTL_EXCEEDED -> new TtlExceededException(status, displayMessage, nested);
+			case QUOTA_EXCEEDED -> new QuotaExceededException(status, displayMessage, nested);
 			case INTEGRITY_ERROR -> new ObjectIntegrityException(status, displayMessage, nested);
 			case PEER_NOT_FOUND -> new PeerNotFoundException(status, displayMessage, nested);
 			case PEER_REQUEST_ERROR -> new PeerRequestException(status, displayMessage, nested);
-			case PEER_RESPONSE_ERROR -> new PeerResponseException(status, displayMessage, nested);
-			case INTERNAL_ERROR -> new IonStoreInternalException(status, displayMessage, nested);
-			case UNKNOWN -> new IonStoreException(status, code, displayMessage, nested);
+			case PEER_RESPONSE_ERROR -> new PeerResponseException(status, displayMessage, nested,
+					peerStatusOf(nestedJson), peerMessageOf(nestedJson));
+			case IO_ERROR -> new IonStoreIOException(status, displayMessage, nested);
+			case METABASE_ERROR -> new MetabaseException(status, displayMessage, nested);
+			case SERVER_ERROR -> new IonStoreServerException(status, displayMessage, nested);
+			// RATE_LIMITED is reserved and not yet emitted by the service; until it has a dedicated
+			// type it surfaces as a plain IonStoreException that still preserves the numeric code.
+			case RATE_LIMITED, UNKNOWN -> new IonStoreException(status, code, displayMessage, nested);
 		};
+	}
+
+	// The peer's own HTTP status from the nested federation detail, or NO_HTTP_STATUS if absent.
+	private static int peerStatusOf(JsonObject nested) {
+		if (nested == null)
+			return NO_HTTP_STATUS;
+		Integer peerStatus = nested.getInteger("statusCode");
+		return peerStatus != null ? peerStatus : NO_HTTP_STATUS;
+	}
+
+	// The peer's own message from the nested federation detail (preferring the flat "message", then a
+	// nested error object's "message"), or null if absent.
+	private static String peerMessageOf(JsonObject nested) {
+		if (nested == null)
+			return null;
+		String peerMessage = nested.getString("message");
+		if (peerMessage == null || peerMessage.isEmpty()) {
+			JsonObject peerError = nested.getJsonObject("error");
+			if (peerError != null)
+				peerMessage = peerError.getString("message");
+		}
+		return peerMessage == null || peerMessage.isEmpty() ? null : peerMessage;
 	}
 
 	// Renders the optional federation "nested" detail (peer status code and message) into a short,

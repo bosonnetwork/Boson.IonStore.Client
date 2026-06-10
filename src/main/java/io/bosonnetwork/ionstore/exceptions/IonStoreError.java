@@ -32,45 +32,54 @@ package io.bosonnetwork.ionstore.exceptions;
  * {@link ForbiddenException}). The category itself is not part of the public API — callers branch on
  * the exception type instead.
  * <p>
- * The set mirrors the service's own error catalogue. Should a newer service report a category this
+ * The set mirrors the service's own error catalogue, which is the canonical specification; the two
+ * copies (one here, one in the service) must be kept in lock-step on every {@code (name, code)} pair.
+ * Codes are banded by concern: {@code 10–19} request/auth, {@code 20–29} object state/limits,
+ * {@code 40–49} federation, {@code 50–99} server-side. Should a newer service report a category this
  * client does not know, it is resolved to {@link #UNKNOWN}, and the failure surfaces as a plain
  * {@link IonStoreException} whose original numeric code is still preserved via
  * {@link IonStoreException#getErrorCode()}.
  */
 enum IonStoreError {
-	/** Missing or invalid CWT bearer token; HTTP {@code 401}. The credentials need to be corrected. */
-	UNAUTHORIZED(1, "Unauthorized"),
-	/** The request is not permitted; HTTP {@code 403}. */
-	FORBIDDEN(2, "Forbidden"),
 	/** Malformed request, invalid object id, or invalid pagination parameter; HTTP {@code 400}. */
-	INVALID_REQUEST(3, "Invalid request"),
-	/** The payload exceeds the service's configured maximum object size; HTTP {@code 413}. */
-	OBJECT_TOO_LARGE(4, "Object size limit exceeded"),
-	/** The user's storage quota is exhausted; HTTP {@code 429}. Free space or retry later. */
-	QUOTA_EXCEEDED(5, "Quota limit exceeded"),
-	/** The requested {@code Ion-TTL} exceeds the service's configured maximum lifetime; HTTP {@code 403}. */
-	TTL_EXCEEDED(6, "TTL limit exceeded"),
+	INVALID_REQUEST(10, "Invalid request"),
+	/** Missing or invalid CWT bearer token; HTTP {@code 401}. The credentials need to be corrected. */
+	UNAUTHORIZED(11, "Unauthorized"),
+	/** The request is not permitted; HTTP {@code 403}. */
+	FORBIDDEN(12, "Forbidden"),
+
 	/** No object exists for the given reference id; HTTP {@code 404}. */
-	OBJECT_NOT_FOUND(7, "Object not found"),
+	OBJECT_NOT_FOUND(20, "Object not found"),
+	/** The payload exceeds the service's configured maximum object size; HTTP {@code 413}. */
+	OBJECT_TOO_LARGE(21, "Object size limit exceeded"),
+	/** The requested {@code Ion-TTL} exceeds the service's configured maximum lifetime; HTTP {@code 403}. */
+	TTL_EXCEEDED(22, "TTL limit exceeded"),
+	/** The user's storage quota is exhausted; HTTP {@code 507}. Free space or retry later. */
+	QUOTA_EXCEEDED(23, "Quota limit exceeded"),
+	/**
+	 * Request-rate limit exceeded; HTTP {@code 429}. Reserved for a future service capability; the
+	 * current service does not yet report it, but the code is allocated so clients map it forward.
+	 */
+	RATE_LIMITED(24, "Rate limit exceeded"),
+	/** The service detected an object-integrity failure on its side; HTTP {@code 422}. */
+	INTEGRITY_ERROR(25, "Object integrity error"),
 
-	/** The service encountered an I/O error while serving the request. */
-	IO_ERROR(8, "IO error"),
-	/** The service's metadata store failed. */
-	METABASE_ERROR(9, "Metabase error"),
-	/** A generic, unclassified server-side failure. */
-	SERVER_ERROR(10, "Server error"),
-	/** The service detected an object-integrity failure on its side. */
-	INTEGRITY_ERROR(11, "Object integrity error"),
+	/** The federation peer that should hold the object could not be located; HTTP {@code 502}. */
+	PEER_NOT_FOUND(40, "Peer not found"),
+	/** The service failed to issue the federated request to the peer; HTTP {@code 502}. */
+	PEER_REQUEST_ERROR(41, "Peer request error"),
+	/** The federation peer returned an error response (see the nested detail on the exception); HTTP {@code 502}. */
+	PEER_RESPONSE_ERROR(42, "Peer response error"),
 
-	/** The federation peer that should hold the object could not be located. */
-	PEER_NOT_FOUND(61, "Peer not found"),
-	/** The service failed to issue the federated request to the peer. */
-	PEER_REQUEST_ERROR(62, "Peer request error"),
-	/** The federation peer returned an error response (see the nested detail on the exception). */
-	PEER_RESPONSE_ERROR(63, "Peer response error"),
-
-	/** An internal service error with no more specific category. */
-	INTERNAL_ERROR(255, "Ion Store internal error"),
+	/** The service encountered an I/O error while serving the request; HTTP {@code 500}. */
+	IO_ERROR(50, "IO error"),
+	/** The service's metadata store failed; HTTP {@code 500}. */
+	METABASE_ERROR(51, "Metabase error"),
+	/**
+	 * A generic server-side failure, and the catch-all for an unexpected internal error with no more
+	 * specific category; HTTP {@code 500}.
+	 */
+	SERVER_ERROR(99, "Ion Store server error"),
 
 	/**
 	 * Sentinel for a category this client does not recognize (for example, one introduced by a newer
