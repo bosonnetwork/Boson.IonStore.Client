@@ -118,7 +118,7 @@ public class IonStore {
 	private static final long ACCESS_TOKEN_TIMEOUT = 10 * 60 * 1000;
 
 	// current supported API version prefix
-	private static final String API_PREFIX = "/v1";
+	private static final String API_VERSION_PREFIX = "/v1";
 
 	// Size threshold for the byte[] put: arrays smaller than this are copied into a single buffer and
 	// sent in one shot; larger arrays are streamed from the array (see put(byte[], PutOptions)).
@@ -183,7 +183,7 @@ public class IonStore {
 			path = "";
 		if (path.endsWith("/"))
 			path = path.substring(0, path.length() - 1);
-		this.basePath = path + API_PREFIX;
+		this.basePath = path + API_VERSION_PREFIX;
 
 		PoolOptions poolOptions = new PoolOptions()
 				.setHttp1MaxSize(16)
