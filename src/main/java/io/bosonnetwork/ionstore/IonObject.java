@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Objects;
 
 import io.vertx.core.json.JsonObject;
+import org.jspecify.annotations.Nullable;
 
 import io.bosonnetwork.Id;
 
@@ -51,9 +52,9 @@ import io.bosonnetwork.Id;
 public class IonObject {
 	private final Id id;
 	private final Id contentId;
-	private final String name;
+	private final @Nullable String name;
 	private final long size;
-	private final String contentType;
+	private final @Nullable String contentType;
 	private final boolean encrypted;
 	private final long expireAt;
 	private final Map<String, Object> metadata;
@@ -72,8 +73,8 @@ public class IonObject {
 	 * @param metadata    custom {@code Ion-*} metadata, or {@code null} for none
 	 * @param uri         the {@code ions://<peerId>/<id>} address of the object, or {@code null}
 	 */
-	public IonObject(Id id, Id contentId, String name, long size, String contentType, boolean encrypted,
-	                 long expireAt, Map<String, Object> metadata, String uri) {
+	public IonObject(Id id, Id contentId, @Nullable String name, long size, @Nullable String contentType, boolean encrypted,
+	                 long expireAt, @Nullable Map<String, Object> metadata, String uri) {
 		this.id = id;
 		this.contentId = contentId;
 		this.name = name;
@@ -110,7 +111,7 @@ public class IonObject {
 	 *
 	 * @return the file name, or {@code null}
 	 */
-	public String getName() {
+	public @Nullable String getName() {
 		return name;
 	}
 
@@ -128,7 +129,7 @@ public class IonObject {
 	 *
 	 * @return the content type, or {@code null}
 	 */
-	public String getContentType() {
+	public @Nullable String getContentType() {
 		return contentType;
 	}
 
@@ -235,8 +236,7 @@ public class IonObject {
 		repr.append(", expireAt=").append(expireAt);
 		if (!metadata.isEmpty())
 			repr.append(", metadata=").append(metadata);
-		if (uri != null)
-			repr.append(", uri=").append(uri);
+		repr.append(", uri=").append(uri);
 		repr.append(']');
 		return repr.toString();
 	}

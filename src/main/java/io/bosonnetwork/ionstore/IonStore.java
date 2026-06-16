@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -63,6 +64,8 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.TrustOptions;
 import io.vertx.core.streams.ReadStream;
 import io.vertx.core.streams.WriteStream;
+import org.jspecify.annotations.NullUnmarked;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -96,15 +99,15 @@ import io.bosonnetwork.web.PaginatedResult;
  * Payload downloads are integrity-checked: the streamed bytes are hashed (SHA-256) and compared
  * against the content id the service advertises in the {@code Ion-Content-Id} header. A mismatch (or
  * a missing/malformed header) fails the download with {@link ObjectIntegrityException}. Because the
- * content id covers the whole object, ranged downloads are intentionally not offered — a partial body
+ * content id covers the whole object, ranged downloads are intentionally not offered - a partial body
  * cannot be verified.
  *
  * <h2>Authentication</h2>
  * Object retrieval is permissionless and sends no token. Upload, list, and delete carry a short-lived
- * {@link SignedCwt CWT} bearer token, minted in one of two mutually exclusive modes selected at build
- * time: <b>user-key mode</b> ({@link Builder#userKey}) or <b>device mode</b> ({@link Builder#userId}
- * + {@link Builder#deviceKey}). Over HTTPS the service's self-signed certificate is pinned to its
- * peer id.
+ * {@link SignedCwt CWT} bearer token, signed by the device key ({@link Builder#deviceKey}) on behalf
+ * of a user. The user is identified either by its key pair ({@link Builder#userKey}, which derives the
+ * user id) or by its id directly ({@link Builder#userId}); a device key is required either way. Over
+ * HTTPS the service's self-signed certificate is pinned to its peer id.
  *
  * <h2>Lifecycle &amp; threading</h2>
  * The underlying {@link HttpClient} is created when the client is constructed, so a client is ready
@@ -134,9 +137,6 @@ public class IonStore {
 
 	private final Vertx vertx;
 
-	// The active signing identity used for access tokens: the user identity in user-key mode, or the
-	// device identity in device mode.
-	private final Identity identity;
 	private final Id userId;
 	private final Identity deviceIdentity;
 
@@ -149,7 +149,7 @@ public class IonStore {
 	private final String basePath;
 
 	private final HttpClient httpClient;
-	private volatile AccessTokenCache tokenCache;
+	private volatile @Nullable AccessTokenCache tokenCache;
 
 	private volatile boolean closed;
 
@@ -157,22 +157,15 @@ public class IonStore {
 
 	private record AccessTokenCache(String token, long createdAt) {}
 
-	private IonStore(Vertx vertx, Signature.KeyPair userKey, Id userId, Signature.KeyPair deviceKey,
-					 Id servicePeerId, URL serviceUrl) {
-		this.vertx = vertx;
-		if (userKey != null) {
-			Identity userIdentity = new CryptoIdentity(userKey);
-			this.identity = userIdentity;
-			this.userId = userIdentity.getId();
-			this.deviceIdentity = null;
-		} else {
-			this.deviceIdentity = new CryptoIdentity(deviceKey);
-			this.identity = deviceIdentity;
-			this.userId = userId;
-		}
+	private IonStore(Builder builder) {
+		this.vertx = Objects.requireNonNull(builder.vertx, "Vert.x instance must be set");
+		this.userId = Objects.requireNonNull(builder.userId, "Either userId or userKey must be set");
 
-		this.servicePeerId = servicePeerId;
-		this.serviceUrl = serviceUrl;
+		Objects.requireNonNull(builder.deviceKey, "deviceKey must be set");
+		this.deviceIdentity = new CryptoIdentity(builder.deviceKey);
+
+		this.servicePeerId = Objects.requireNonNull(builder.servicePeerId, "servicePeerId must be set");
+		this.serviceUrl = Objects.requireNonNull(builder.serviceUrl, "serviceUrl must be set");
 
 		boolean ssl = serviceUrl.getProtocol().equals("https");
 		this.host = serviceUrl.getHost();
@@ -222,13 +215,12 @@ public class IonStore {
 	}
 
 	/**
-	 * Returns the device id this client signs tokens with in device mode, or {@code null} in user-key
-	 * mode.
+	 * Returns the device id this client signs tokens with.
 	 *
-	 * @return the device id, or {@code null} in user-key mode
+	 * @return the device id
 	 */
 	public Id getDeviceId() {
-		return deviceIdentity != null ? deviceIdentity.getId() : null;
+		return deviceIdentity.getId();
 	}
 
 	/**
@@ -323,7 +315,7 @@ public class IonStore {
 		closedCheck();
 
 		// The array is already wholly in memory, so streaming it does not reduce the caller's footprint
-		// — it only avoids the single extra copy that Buffer.buffer makes, at the cost of per-chunk
+		// - it only avoids the single extra copy that Buffer.buffer makes, at the cost of per-chunk
 		// worker-thread hops. That trade-off only pays off for large arrays, so copy-and-send below the
 		// threshold and stream above it.
 		if (content.length < IN_MEMORY_PUT_THRESHOLD)
@@ -454,14 +446,14 @@ public class IonStore {
 	 * <p>
 	 * The stream is written on a worker thread, flushed when the transfer completes, and <b>not</b>
 	 * closed by this method: the caller retains ownership. Note that, unlike the file variant, the
-	 * destination cannot be rolled back — if the integrity check fails, the (corrupt) bytes will
+	 * destination cannot be rolled back - if the integrity check fails, the (corrupt) bytes will
 	 * already have been written before the returned future fails.
 	 *
 	 * @param id  the object reference id (must not be {@code null})
 	 * @param dst the destination output stream (must not be {@code null})
 	 * @return a future completing with the object metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> get(Id id, OutputStream dst) {
+	public ContextualFuture<Optional<IonObject>> get(Id id, OutputStream dst) {
 		Objects.requireNonNull(id, "id");
 		Objects.requireNonNull(dst, "dst");
 		return get(id, new AsyncOutputStream(vertx, dst, false));
@@ -476,7 +468,7 @@ public class IonStore {
 	 * @param dst    the destination output stream (must not be {@code null})
 	 * @return a future completing with the object metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> get(Id peerId, Id id, OutputStream dst) {
+	public ContextualFuture<Optional<IonObject>> get(Id peerId, Id id, OutputStream dst) {
 		Objects.requireNonNull(peerId, "peerId");
 		Objects.requireNonNull(id, "id");
 		Objects.requireNonNull(dst, "dst");
@@ -494,7 +486,7 @@ public class IonStore {
 	 * @param dst the destination write stream (must not be {@code null})
 	 * @return a future completing with the object metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> get(Id id, WriteStream<Buffer> dst) {
+	public ContextualFuture<Optional<IonObject>> get(Id id, WriteStream<Buffer> dst) {
 		Objects.requireNonNull(id, "id");
 		Objects.requireNonNull(dst, "dst");
 		closedCheck();
@@ -510,7 +502,7 @@ public class IonStore {
 	 * @param dst    the destination write stream (must not be {@code null})
 	 * @return a future completing with the object metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> get(Id peerId, Id id, WriteStream<Buffer> dst) {
+	public ContextualFuture<Optional<IonObject>> get(Id peerId, Id id, WriteStream<Buffer> dst) {
 		Objects.requireNonNull(peerId, "peerId");
 		Objects.requireNonNull(id, "id");
 		Objects.requireNonNull(dst, "dst");
@@ -526,7 +518,7 @@ public class IonStore {
 	 * @param file the destination file (must not be {@code null})
 	 * @return a future completing with the object metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> get(Id id, Path file) {
+	public ContextualFuture<Optional<IonObject>> get(Id id, Path file) {
 		Objects.requireNonNull(id, "id");
 		Objects.requireNonNull(file, "file");
 		closedCheck();
@@ -542,7 +534,7 @@ public class IonStore {
 	 * @param file   the destination file (must not be {@code null})
 	 * @return a future completing with the object metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> get(Id peerId, Id id, Path file) {
+	public ContextualFuture<Optional<IonObject>> get(Id peerId, Id id, Path file) {
 		Objects.requireNonNull(peerId, "peerId");
 		Objects.requireNonNull(id, "id");
 		Objects.requireNonNull(file, "file");
@@ -557,7 +549,7 @@ public class IonStore {
 	 * @param id the object reference id (must not be {@code null})
 	 * @return a future completing with the in-memory object, or {@code null} if it was not found
 	 */
-	public ContextualFuture<BytesIonObject> get(Id id) {
+	public ContextualFuture<Optional<BytesIonObject>> get(Id id) {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 		return ContextualFuture.of(downloadToMemory(uri("/objects/" + id), servicePeerId, id).recover(IonStore::wrapError));
@@ -571,33 +563,33 @@ public class IonStore {
 	 * @param id     the object reference id (must not be {@code null})
 	 * @return a future completing with the in-memory object, or {@code null} if it was not found
 	 */
-	public ContextualFuture<BytesIonObject> get(Id peerId, Id id) {
+	public ContextualFuture<Optional<BytesIonObject>> get(Id peerId, Id id) {
 		Objects.requireNonNull(peerId, "peerId");
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 		return ContextualFuture.of(downloadToMemory(uri("/objects/" + peerId + "/" + id), peerId, id).recover(IonStore::wrapError));
 	}
 
-	private Future<BytesIonObject> downloadToMemory(String uri, Id ownerPeerId, Id id) {
+	private Future<Optional<BytesIonObject>> downloadToMemory(String uri, Id ownerPeerId, Id id) {
 		BufferWriteStream ws = new BufferWriteStream();
 		return download(uri, ownerPeerId, id, ws)
-				.map(meta -> meta == null ? null : new BytesIonObject(meta, ws.toBuffer()));
+				.map(meta -> meta.map(ionObject -> new BytesIonObject(ionObject, ws.toBuffer())));
 	}
 
-	private Future<IonObject> downloadToFile(String uri, Id ownerPeerId, Id id, Path file) {
+	private Future<Optional<IonObject>> downloadToFile(String uri, Id ownerPeerId, Id id, Path file) {
 		String fp = file.toString();
 		return vertx.fileSystem()
 				.open(fp, new OpenOptions().setWrite(true).setCreate(true).setTruncateExisting(true))
 				.compose(af -> download(uri, ownerPeerId, id, af)
 						.recover(e -> closeAndDelete(af, fp).transform(x -> Future.failedFuture(e)))
-						.compose(meta -> meta != null ?
+						.compose(meta -> meta.isPresent() ?
 								Future.succeededFuture(meta) :
-								closeAndDelete(af, fp).mapEmpty()));
+								closeAndDelete(af, fp).map(meta)));
 	}
 
 	// Streams the verified payload to dst. On HTTP 200 the content is hashed while piping and checked
 	// against the advertised Ion-Content-Id; on 404 the body is drained and null is returned.
-	private Future<IonObject> download(String uri, Id ownerPeerId, Id id, WriteStream<Buffer> dst) {
+	private Future<Optional<IonObject>> download(String uri, Id ownerPeerId, Id id, WriteStream<Buffer> dst) {
 		return httpClient.request(requestOptions(HttpMethod.GET, uri))
 				.compose(HttpClientRequest::send)
 				.compose(response -> {
@@ -626,11 +618,10 @@ public class IonStore {
 								return Future.failedFuture(new ObjectIntegrityException(
 										"Integrity check failed for object " + id + ": expected content id " +
 												expectedContentId + ", computed " + actualContentId));
-							return Future.succeededFuture(
-									ionObjectFromHeaders(ownerPeerId, id, response, size.get()));
+							return Future.succeededFuture(Optional.of(ionObjectFromHeaders(ownerPeerId, id, response, size.get())));
 						});
 					} else if (statusCode == 404) {
-						return Future.succeededFuture();
+						return Future.succeededFuture(Optional.empty());
 					} else {
 						return failFromResponse(response);
 					}
@@ -667,11 +658,11 @@ public class IonStore {
 	 * @param id the object reference id (must not be {@code null})
 	 * @return a future completing with the metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<IonObject> getIonObject(Id id) {
+	public ContextualFuture<Optional<IonObject>> getIonObject(Id id) {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 
-		Future<IonObject> future = httpClient.request(requestOptions(HttpMethod.GET, uri("/objects/" + id)))
+		Future<Optional<IonObject>> future = httpClient.request(requestOptions(HttpMethod.GET, uri("/objects/" + id)))
 				.compose(request -> {
 					request.putHeader("Accept", "application/json");
 					return request.send();
@@ -680,13 +671,13 @@ public class IonStore {
 					if (response.statusCode() == 200) {
 						return response.body().compose(buf -> {
 							try {
-								return Future.succeededFuture(IonObject.fromJson(new JsonObject(buf)));
+								return Future.succeededFuture(Optional.of(IonObject.fromJson(new JsonObject(buf))));
 							} catch (Exception e) {
 								return Future.failedFuture(new IonStoreException("Malformed metadata response", e));
 							}
 						});
 					} else if (response.statusCode() == 404) {
-						return Future.succeededFuture();
+						return Future.succeededFuture(Optional.<IonObject>empty());
 					} else {
 						return failFromResponse(response);
 					}
@@ -811,15 +802,14 @@ public class IonStore {
 	private String getAccessToken() {
 		AccessTokenCache tc = tokenCache;
 		if (tc == null || System.currentTimeMillis() - tc.createdAt > ACCESS_TOKEN_TIMEOUT) {
-			SignedCwt.Builder builder = SignedCwt.builder(identity)
+			SignedCwt.Builder builder = SignedCwt.builder(deviceIdentity)
 					.subject(userId)
 					.audience(servicePeerId)
 					.expiration(Duration.ofMillis(ACCESS_TOKEN_TIMEOUT + 1000 * 60))
 					.notBeforeNow()
 					.issuedAtNow()
-					.scope(AccessScope.CLIENT.toString());
-			if (deviceIdentity != null)
-				builder.clientId(deviceIdentity.getId());
+					.scope(AccessScope.CLIENT.toString())
+					.clientId(deviceIdentity.getId());
 
 			String token = builder.buildToString();
 			tc = new AccessTokenCache(token, System.currentTimeMillis());
@@ -914,7 +904,7 @@ public class IonStore {
 	 * {@code filename*=} form over a plain {@code filename=} and reducing the result to its last path
 	 * segment. Returns {@code null} when no usable name is present. (Mirrors the service's parser.)
 	 */
-	private static String getFileName(String disposition) {
+	private static @Nullable String getFileName(@Nullable String disposition) {
 		if (disposition == null)
 			return null;
 
@@ -1023,8 +1013,10 @@ public class IonStore {
 	 * {@link #servicePeerId(Id) servicePeerId} and {@link #serviceUrl(URL) serviceUrl} are both
 	 * required. Not thread-safe.
 	 */
+	@NullUnmarked
 	public static class Builder {
 		private Vertx vertx;
+		@SuppressWarnings("unused")
 		private Signature.KeyPair userKey;
 		private Id userId;
 		private Signature.KeyPair deviceKey;
@@ -1032,6 +1024,8 @@ public class IonStore {
 		private URL serviceUrl;
 
 		private Builder() {
+			// Try to autoconfigure the Vert.x instance if the builder is created within a Vert.x context.
+			this.vertx = Vertx.currentContext() != null ? Vertx.currentContext().owner() : null;
 		}
 
 		/**
@@ -1047,8 +1041,23 @@ public class IonStore {
 		}
 
 		/**
-		 * Selects user-key mode using the given user key pair (the client signs tokens as the user).
-		 * Mutually exclusive with device mode ({@link #userId}/{@link #deviceKey}).
+		 * Sets the user id directly. The device key ({@link #deviceKey}) signs tokens on behalf of this
+		 * user. Mutually exclusive with {@link #userKey} (whichever is set last wins).
+		 *
+		 * @param userId the user id (must not be {@code null})
+		 * @return this builder
+		 */
+		public Builder userId(Id userId) {
+			Objects.requireNonNull(userId, "userId");
+			this.userId = userId;
+			this.userKey = null;
+			return this;
+		}
+
+		/**
+		 * Supplies the user identity from the given user key pair, deriving the user id from it. The
+		 * device key ({@link #deviceKey}) still signs the tokens; the user key itself is not used for
+		 * signing. Mutually exclusive with {@link #userId} (whichever is set last wins).
 		 *
 		 * @param key the user key pair (must not be {@code null})
 		 * @return this builder
@@ -1056,11 +1065,12 @@ public class IonStore {
 		public Builder userKey(Signature.KeyPair key) {
 			Objects.requireNonNull(key, "key");
 			this.userKey = key;
+			this.userId = Id.of(key.publicKey().bytes());
 			return this;
 		}
 
 		/**
-		 * Selects user-key mode from an encoded private key string.
+		 * Supplies the user identity from an encoded private key string (derives the user id).
 		 *
 		 * @param privateKey the user private key, either a {@code 0x}-prefixed hex string or a Base58 string
 		 * @return this builder
@@ -1072,7 +1082,7 @@ public class IonStore {
 		}
 
 		/**
-		 * Selects user-key mode from a raw private key.
+		 * Supplies the user identity from a raw private key (derives the user id).
 		 *
 		 * @param privateKey the user private key bytes (must be {@link Signature.PrivateKey#BYTES} long)
 		 * @return this builder
@@ -1086,21 +1096,8 @@ public class IonStore {
 		}
 
 		/**
-		 * Sets the user id for device mode. Used together with {@link #deviceKey}: the device signs
-		 * tokens on behalf of this user.
-		 *
-		 * @param userId the user id (must not be {@code null})
-		 * @return this builder
-		 */
-		public Builder userId(Id userId) {
-			Objects.requireNonNull(userId, "userId");
-			this.userId = userId;
-			return this;
-		}
-
-		/**
-		 * Selects device mode using the given device key pair. Used together with {@link #userId}.
-		 * Mutually exclusive with user-key mode ({@link #userKey}).
+		 * Sets the device key pair used to sign tokens (required). The user is identified separately
+		 * via {@link #userKey} or {@link #userId}.
 		 *
 		 * @param key the device key pair (must not be {@code null})
 		 * @return this builder
@@ -1112,7 +1109,7 @@ public class IonStore {
 		}
 
 		/**
-		 * Selects device mode from an encoded private key string.
+		 * Sets the device key from an encoded private key string.
 		 *
 		 * @param privateKey the device private key, either a {@code 0x}-prefixed hex string or a Base58 string
 		 * @return this builder
@@ -1124,7 +1121,7 @@ public class IonStore {
 		}
 
 		/**
-		 * Selects device mode from a raw private key.
+		 * Sets the device key from a raw private key.
 		 *
 		 * @param privateKey the device private key bytes (must be {@link Signature.PrivateKey#BYTES} long)
 		 * @return this builder
@@ -1185,27 +1182,15 @@ public class IonStore {
 		 * Validates the configuration and builds the {@link IonStore} client.
 		 *
 		 * @return the configured client
-		 * @throws IllegalStateException if no authentication mode is configured, if {@code deviceKey} is
-		 *         used without a {@code userId}, or if {@code servicePeerId} or {@code serviceUrl} is missing
+		 * @throws IllegalStateException if the {@code deviceKey}, the user identity ({@code userKey} or
+		 *         {@code userId}), {@code servicePeerId}, or {@code serviceUrl} is missing
 		 */
 		public IonStore build() {
-			if (userKey == null && deviceKey == null)
-				throw new IllegalStateException("Either userKey (user mode) or deviceKey (device mode) must be set");
-
-			if (userKey == null && userId == null)
-				throw new IllegalStateException("userId is required in device mode (when userKey is not set)");
-
-			if (servicePeerId == null)
-				throw new IllegalStateException("Service peer ID not set");
-
-			if (serviceUrl == null)
-				throw new IllegalStateException("Service URL not set");
-
-			Vertx v = vertx != null ? vertx : Vertx.currentContext() != null ? Vertx.currentContext().owner() : null;
-			if (v == null)
-				throw new IllegalStateException("Vertx not set and no current Vert.x context available");
-
-			return new IonStore(v, userKey, userId, deviceKey, servicePeerId, serviceUrl);
+			try {
+				return new IonStore(this);
+			} catch (NullPointerException | IllegalArgumentException e) {
+				throw new IllegalStateException("Invalid IonStore configuration: " + e.getMessage(), e);
+			}
 		}
 	}
 

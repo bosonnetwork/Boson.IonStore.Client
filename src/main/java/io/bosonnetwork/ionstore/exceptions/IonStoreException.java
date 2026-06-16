@@ -46,7 +46,7 @@ import io.bosonnetwork.BosonException;
  * }
  * }</pre>
  * Catching by type is preferable to branching on the HTTP {@linkplain #getStatus() status}, because a
- * single status can map to more than one category — HTTP {@code 403} is returned both for
+ * single status can map to more than one category - HTTP {@code 403} is returned both for
  * {@link ForbiddenException} and for {@link TtlExceededException}.
  * <p>
  * When the failure corresponds to an HTTP error response, the exception preserves the useful details
@@ -265,8 +265,8 @@ public class IonStoreException extends BosonException {
 	}
 
 	/**
-	 * Returns a short, human-readable description of the nested federation error — the status and
-	 * message the remote peer returned for a federated retrieval — or {@code null} when the failure did
+	 * Returns a short, human-readable description of the nested federation error - the status and
+	 * message the remote peer returned for a federated retrieval - or {@code null} when the failure did
 	 * not originate from a peer. The same text is also appended to {@link #getMessage()}.
 	 *
 	 * @return the nested peer-error description, or {@code null} if there is none

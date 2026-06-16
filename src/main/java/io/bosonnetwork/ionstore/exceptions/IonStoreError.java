@@ -28,8 +28,8 @@ package io.bosonnetwork.ionstore.exceptions;
  * This is an internal mapping table: every error response from the service carries a {@code type}
  * (this category's {@linkplain #name() name}) and a stable numeric {@code code}, which
  * {@link IonStoreException#fromResponse(int, io.vertx.core.buffer.Buffer)} uses to select the
- * corresponding public exception subclass (for example {@link FORBIDDEN} &rarr;
- * {@link ForbiddenException}). The category itself is not part of the public API — callers branch on
+ * corresponding public exception subclass (for example {@link #FORBIDDEN} &rarr;
+ * {@link ForbiddenException}). The category itself is not part of the public API - callers branch on
  * the exception type instead.
  * <p>
  * The set mirrors the service's own error catalogue, which is the canonical specification; the two

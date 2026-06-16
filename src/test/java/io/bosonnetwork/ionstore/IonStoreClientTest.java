@@ -114,6 +114,7 @@ class IonStoreClientTest {
 		client = IonStore.builder()
 				.vertx(vertx)
 				.userKey(Signature.KeyPair.random())
+				.deviceKey(Signature.KeyPair.random())
 				.servicePeerId(Id.random())
 				.serviceUrl("http://localhost:" + port)
 				.build();
@@ -132,7 +133,7 @@ class IonStoreClientTest {
 	@Test
 	void downloadVerifiesIntegrityAndReturnsContent() throws Exception {
 		BytesIonObject result = client.get(goodId)
-				.toCompletableFuture().get(5, TimeUnit.SECONDS);
+				.toCompletableFuture().get(5, TimeUnit.SECONDS).orElseThrow();
 
 		assertEquals(PAYLOAD.length, result.getContent().length());
 		assertEquals(Buffer.buffer(PAYLOAD), result.getContent());
@@ -161,7 +162,7 @@ class IonStoreClientTest {
 	@Test
 	void downloadReturnsNullWhenNotFound() throws Exception {
 		BytesIonObject result = client.get(Id.random())
-				.toCompletableFuture().get(5, TimeUnit.SECONDS);
+				.toCompletableFuture().get(5, TimeUnit.SECONDS).orElse(null);
 		assertNull(result);
 	}
 
