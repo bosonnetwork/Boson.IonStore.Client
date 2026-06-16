@@ -24,7 +24,7 @@ package io.bosonnetwork.ionstore.exceptions;
 
 /**
  * Thrown when the request carries a missing or invalid CWT bearer token; HTTP {@code 401}. The
- * credentials must be corrected — retrying the request unchanged will not help. Raised only for the
+ * credentials must be corrected - retrying the request unchanged will not help. Raised only for the
  * token-bearing operations (put, list, delete); object retrieval is permissionless.
  */
 public class UnauthorizedException extends IonStoreException {

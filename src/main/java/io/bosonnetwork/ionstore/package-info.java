@@ -55,4 +55,8 @@
  * @see io.bosonnetwork.ionstore.IonObject
  * @see io.bosonnetwork.ionstore.exceptions.IonStoreException
  */
+
+@NullMarked
 package io.bosonnetwork.ionstore;
+
+import org.jspecify.annotations.NullMarked;

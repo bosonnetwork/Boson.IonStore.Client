@@ -22,6 +22,12 @@
     </description>
     <url>https://github.com/bosonnetwork/Boson.IonStore.Client</url>
 
+    <properties>
+        <!-- Build-time null checking is enabled by the `.nullaway` marker file in this module root
+             (see the `nullaway` profile in boson-parent); this narrows the checked packages. -->
+        <nullaway.annotatedPackages>io.bosonnetwork.ionstore</nullaway.annotatedPackages>
+    </properties>
+
     <licenses>
         <license>
             <name>MIT License</name>
@@ -66,6 +72,11 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>io.bosonnetwork</groupId>
             <artifactId>boson-api</artifactId>

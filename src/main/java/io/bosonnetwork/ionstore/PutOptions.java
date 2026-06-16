@@ -27,6 +27,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
+import org.jspecify.annotations.NullUnmarked;
+
 /**
  * Options for an {@link IonStore} put: the logical file name, content type, lifetime, encryption
  * flag and any custom {@code Ion-*} metadata.
@@ -41,6 +43,7 @@ import java.util.Objects;
  * within ~8&nbsp;KB). The reserved names {@code Ion-TTL}, {@code Ion-Encrypted}, {@code Ion-Expire-At}
  * and {@code Ion-Content-Id} are server-managed and cannot be used as custom metadata.
  */
+@NullUnmarked
 public class PutOptions {
 	private static final PutOptions NONE = builder().build();
 
