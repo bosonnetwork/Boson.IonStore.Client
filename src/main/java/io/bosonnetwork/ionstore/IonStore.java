@@ -629,7 +629,9 @@ public class IonStore {
 	}
 
 	private IonObject ionObjectFromHeaders(Id ownerPeerId, Id id, HttpClientResponse response, long size) {
-		Id contentId = Id.of(response.headers().get(ION_CONTENT_ID));
+		String cid = Objects.requireNonNull(response.headers().get(ION_CONTENT_ID),
+				"Response is missing the " + ION_CONTENT_ID + " header");
+		Id contentId = Id.of(cid);
 		String name = getFileName(response.headers().get("Content-Disposition"));
 		String contentType = response.headers().get("Content-Type");
 		boolean encrypted = Boolean.parseBoolean(response.headers().get(ION_ENCRYPTED));
@@ -1203,7 +1205,7 @@ public class IonStore {
 		}
 
 		@Override
-		public WriteStream<Buffer> exceptionHandler(Handler<Throwable> handler) {
+		public WriteStream<Buffer> exceptionHandler(@Nullable Handler<Throwable> handler) {
 			return this;
 		}
 
@@ -1229,7 +1231,7 @@ public class IonStore {
 		}
 
 		@Override
-		public WriteStream<Buffer> drainHandler(Handler<Void> handler) {
+		public WriteStream<Buffer> drainHandler(@Nullable Handler<Void> handler) {
 			return this;
 		}
 	}
