@@ -336,12 +336,19 @@ public class IonStore {
 		Objects.requireNonNull(options, "options");
 		closedCheck();
 
+		// Client-side upload integrity: hash exactly the bytes we send and verify the server committed to
+		// the same content id (see verifyUploadedContentId), so a corrupted/partial upload fails here.
+		MessageDigest md = Hash.sha256();
+		md.update(content.getBytes());
+		Id expectedContentId = Id.of(md.digest());
+
 		Future<IonObject> future = httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
 				.compose(request -> {
 					applyUploadHeaders(request, options, content.length());
 					return request.send(content);
 				})
 				.compose(this::handleUploadResponse)
+				.compose(obj -> verifyUploadedContentId(obj, expectedContentId))
 				.recover(IonStore::wrapError);
 
 		return ContextualFuture.of(future);
@@ -393,13 +400,30 @@ public class IonStore {
 	}
 
 	private Future<IonObject> upload(ReadStream<Buffer> content, long length, PutOptions options) {
+		// Hash the bytes as they stream out and verify the server committed to the same content id, so a
+		// silently corrupted or truncated upload fails here instead of being stored (and later served) as
+		// a valid-looking but broken object. Symmetric to the download-side integrity check.
+		MessageDigest md = Hash.sha256();
+		ReadStream<Buffer> observed = new ObservableReadStream<>(content, buf -> md.update(buf.getBytes()));
 		return httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
 				.compose(request -> {
 					applyUploadHeaders(request, options, length);
-					return request.send(content);
+					return request.send(observed);
 				})
 				.compose(this::handleUploadResponse)
+				.compose(obj -> verifyUploadedContentId(obj, Id.of(md.digest())))
 				.recover(IonStore::wrapError);
+	}
+
+	// Fails the upload if the object the server stored does not carry the content id computed over the
+	// bytes we actually sent (a partial or corrupted upload). The orphaned server object, if any, is
+	// left to expire by its TTL.
+	private Future<IonObject> verifyUploadedContentId(IonObject obj, Id expectedContentId) {
+		if (!expectedContentId.equals(obj.getContentId()))
+			return Future.failedFuture(new ObjectIntegrityException(
+					"Upload integrity check failed for object " + obj.getId() + ": expected content id " +
+							expectedContentId + ", server stored " + obj.getContentId()));
+		return Future.succeededFuture(obj);
 	}
 
 	private void applyUploadHeaders(HttpClientRequest request, PutOptions options, long length) {
