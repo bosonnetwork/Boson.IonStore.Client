@@ -22,7 +22,6 @@
 
 package io.bosonnetwork.ionstore;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -83,6 +82,8 @@ import io.bosonnetwork.utils.Base58;
 import io.bosonnetwork.utils.Hex;
 import io.bosonnetwork.vertx.AsyncInputStream;
 import io.bosonnetwork.vertx.AsyncOutputStream;
+import io.bosonnetwork.vertx.BufferReadStream;
+import io.bosonnetwork.vertx.ByteArrayReadStream;
 import io.bosonnetwork.vertx.ContextualFuture;
 import io.bosonnetwork.vertx.ObservableReadStream;
 import io.bosonnetwork.web.PaginatedResult;
@@ -126,6 +127,8 @@ public class IonStore {
 	// Size threshold for the byte[] put: arrays smaller than this are copied into a single buffer and
 	// sent in one shot; larger arrays are streamed from the array (see put(byte[], PutOptions)).
 	private static final int IN_MEMORY_PUT_THRESHOLD = 1024 * 1024; // 1 MiB
+
+	protected static final int CHUNK_SIZE = 32 * 1024;
 
 	// Ion-* header names (mirrors the service's IonStoreHeaders; redeclared here to avoid depending
 	// on the service module).
@@ -280,7 +283,7 @@ public class IonStore {
 		Objects.requireNonNull(content, "content");
 		Objects.requireNonNull(options, "options");
 		closedCheck();
-		return put(new AsyncInputStream(vertx, content, 8192, false), length, options);
+		return put(new AsyncInputStream(vertx, content, CHUNK_SIZE, false), length, options);
 	}
 
 	/**
@@ -321,7 +324,7 @@ public class IonStore {
 		if (content.length < IN_MEMORY_PUT_THRESHOLD)
 			return put(Buffer.buffer(content), options); // Buffer.buffer copies the array
 		else
-			return put(new ByteArrayInputStream(content), content.length, options);
+			return put(new ByteArrayReadStream(content), content.length, options);
 	}
 
 	/**
@@ -336,24 +339,27 @@ public class IonStore {
 		Objects.requireNonNull(options, "options");
 		closedCheck();
 
-		// Client-side upload integrity: hash exactly the bytes we send and verify the server committed to
-		// the same content id (see verifyUploadedContentId), so a corrupted/partial upload fails here.
-		MessageDigest md = Hash.sha256();
-		md.update(content.getBytes());
-		Id expectedContentId = Id.of(md.digest());
+		if (content.length() < IN_MEMORY_PUT_THRESHOLD) {
+			// Client-side upload integrity: hash exactly the bytes we send and verify the server committed to
+			// the same content id (see verifyUploadedContentId), so a corrupted/partial upload fails here.
+			MessageDigest md = Hash.sha256();
+			md.update(content.getBytes());
+			Id expectedContentId = Id.of(md.digest());
 
-		Future<IonObject> future = httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
-				.compose(request -> {
-					applyUploadHeaders(request, options, content.length());
-					return request.send(content);
-				})
-				.compose(this::handleUploadResponse)
-				.compose(obj -> verifyUploadedContentId(obj, expectedContentId))
-				.recover(IonStore::wrapError);
+			Future<IonObject> future = httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
+					.compose(request -> {
+						applyUploadHeaders(request, options, content.length());
+						return request.send(content);
+					})
+					.compose(this::handleUploadResponse)
+					.compose(obj -> verifyUploadedContentId(obj, expectedContentId))
+					.recover(IonStore::wrapError);
 
-		return ContextualFuture.of(future);
+			return ContextualFuture.of(future);
+		} else {
+			return put(new BufferReadStream(content), content.length(), options);
+		}
 	}
-
 
 	/**
 	 * Stores an object by streaming the contents of a file. When the options do not specify a name or
@@ -390,6 +396,7 @@ public class IonStore {
 		Future<IonObject> future = vertx.fileSystem()
 				.open(file.toString(), new OpenOptions().setRead(true).setWrite(false))
 				.compose(af -> {
+					af.setReadBufferSize(CHUNK_SIZE);
 					// Close the source file once the upload settles, then propagate its original outcome.
 					Future<IonObject> upload = upload(af, length, effective);
 					return upload.transform(ar -> af.close().transform(x -> ar.succeeded() ?
