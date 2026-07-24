@@ -132,7 +132,7 @@ class IonStoreClientTest {
 
 	@Test
 	void downloadVerifiesIntegrityAndReturnsContent() throws Exception {
-		BytesIonObject result = client.get(goodId)
+		BytesIonObject result = client.get(goodId).toBytes()
 				.toCompletableFuture().get(5, TimeUnit.SECONDS).orElseThrow();
 
 		assertEquals(PAYLOAD.length, result.getContent().length());
@@ -148,20 +148,20 @@ class IonStoreClientTest {
 	@Test
 	void downloadRejectsContentIdMismatch() {
 		ExecutionException e = assertThrows(ExecutionException.class,
-				() -> client.get(badId).toCompletableFuture().get(5, TimeUnit.SECONDS));
+				() -> client.get(badId).toBytes().toCompletableFuture().get(5, TimeUnit.SECONDS));
 		assertInstanceOf(ObjectIntegrityException.class, e.getCause());
 	}
 
 	@Test
 	void downloadRejectsMissingContentIdHeader() {
 		ExecutionException e = assertThrows(ExecutionException.class,
-				() -> client.get(missingHeaderId).toCompletableFuture().get(5, TimeUnit.SECONDS));
+				() -> client.get(missingHeaderId).toBytes().toCompletableFuture().get(5, TimeUnit.SECONDS));
 		assertInstanceOf(ObjectIntegrityException.class, e.getCause());
 	}
 
 	@Test
 	void downloadReturnsNullWhenNotFound() throws Exception {
-		BytesIonObject result = client.get(Id.random())
+		BytesIonObject result = client.get(Id.random()).toBytes()
 				.toCompletableFuture().get(5, TimeUnit.SECONDS).orElse(null);
 		assertNull(result);
 	}

@@ -31,8 +31,8 @@ import io.bosonnetwork.Id;
 /**
  * An {@link IonObject} that also carries its (integrity-verified) payload in memory.
  * <p>
- * Returned by the in-memory retrieval methods ({@link IonStore#get(Id)} and
- * {@link IonStore#get(Id, Id)}). Being an {@code IonObject}, it exposes all of the object's metadata
+ * Returned by the in-memory retrieval methods ({@link IonStore#getAsBytes(Id)} and
+ * {@link IonStore#getAsBytes(Id, Id)}). Being an {@code IonObject}, it exposes all of the object's metadata
  * directly; {@link #getContent()} / {@link #getBytes()} additionally provide the bytes. This mirrors
  * the {@code put} side, which accepts bytes and returns an {@link IonObject}.
  * <p>

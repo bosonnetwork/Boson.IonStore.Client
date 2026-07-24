@@ -42,6 +42,11 @@
  *       {@link io.bosonnetwork.ionstore.exceptions.PeerRequestException},
  *       {@link io.bosonnetwork.ionstore.exceptions.PeerResponseException} - federation faults, HTTP {@code 502}</li>
  * </ul>
+ * One category is raised by the client alone and never reported by the service:
+ * {@link io.bosonnetwork.ionstore.exceptions.DecryptionException}, when a retrieval and the object it
+ * names disagree about encryption, or the object cannot be framed for decryption. It carries no HTTP
+ * status.
+ * <p>
  * Catching by type is preferable to branching on the HTTP status, since a single status can map to more
  * than one category (HTTP {@code 403} covers both {@code ForbiddenException} and
  * {@code TtlExceededException}). An error category the client does not recognize surfaces as a plain
