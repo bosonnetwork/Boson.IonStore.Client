@@ -125,6 +125,46 @@ public class IonObject {
 	}
 
 	/**
+	 * Returns the length of the payload a reader actually receives: the plaintext length.
+	 * <p>
+	 * For an object that is not encrypted this is {@link #getSize()}. For an encrypted one the two
+	 * differ - {@code getSize()} is the length of the stored ciphertext, which carries a stream header
+	 * and a per-chunk authentication tag on top of the plaintext - and this method removes that
+	 * overhead, using the object's own encryption descriptor rather than assuming today's framing.
+	 * <p>
+	 * This is the number to size a buffer with, or to check free space against, before retrieving an
+	 * object with {@link GetRequest#decrypt(byte[])}. Note that it is <em>not</em> what a
+	 * {@link GetRequest#raw() raw} retrieval delivers: that one hands back the stored bytes, so its
+	 * length is {@link #getSize()}.
+	 *
+	 * @return the plaintext length in bytes
+	 * @throws IllegalStateException if the object is encrypted but its size and encryption descriptor
+	 *                               do not describe a payload this client could have produced (in which
+	 *                               case it cannot be decrypted either)
+	 */
+	public long getPlainTextSize() {
+		if (!encrypted)
+			return size;
+
+		try {
+			return DecryptedWriteStream.getPlainTextSize(size, IonStore.parseEncryptionDescriptor(descriptor()));
+		} catch (Exception e) {
+			throw new IllegalStateException("Cannot determine the plaintext size of object " + id + ": "
+					+ e.getMessage(), e);
+		}
+	}
+
+	// The metadata map is keyed by header name, and a header's case is whatever the peer that wrote it
+	// chose, so this cannot be a plain map lookup.
+	private @Nullable String descriptor() {
+		for (Map.Entry<String, Object> e : metadata.entrySet())
+			if (e.getKey().equalsIgnoreCase(IonStore.ION_ENCRYPTION))
+				return e.getValue() == null ? null : e.getValue().toString();
+
+		return null;
+	}
+
+	/**
 	 * Returns the MIME content type, or {@code null} if none was supplied.
 	 *
 	 * @return the content type, or {@code null}

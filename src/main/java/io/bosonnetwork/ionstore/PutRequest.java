@@ -388,7 +388,7 @@ public class PutRequest {
 		if (contentSource == ContentSource.EMPTY)
 			throw new IllegalStateException("No content provided");
 
-		return store.put(this);
+		return ContextualFuture.of(store.put(this));
 	}
 
 	PutRequest dup() {

@@ -46,7 +46,6 @@ import java.util.function.IntFunction;
 import java.util.function.Supplier;
 
 import io.vertx.core.Future;
-import io.vertx.core.Handler;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -78,6 +77,7 @@ import io.bosonnetwork.crypto.HybridTrustManager;
 import io.bosonnetwork.crypto.SecretStream;
 import io.bosonnetwork.crypto.Signature;
 import io.bosonnetwork.cwt.SignedCwt;
+import io.bosonnetwork.ionstore.exceptions.DecryptionException;
 import io.bosonnetwork.ionstore.exceptions.IonStoreException;
 import io.bosonnetwork.ionstore.exceptions.ObjectIntegrityException;
 import io.bosonnetwork.service.AccessScope;
@@ -86,6 +86,7 @@ import io.bosonnetwork.utils.Hex;
 import io.bosonnetwork.vertx.AsyncInputStream;
 import io.bosonnetwork.vertx.AsyncOutputStream;
 import io.bosonnetwork.vertx.BufferReadStream;
+import io.bosonnetwork.vertx.BufferWriteStream;
 import io.bosonnetwork.vertx.ByteArrayReadStream;
 import io.bosonnetwork.vertx.ContextualFuture;
 import io.bosonnetwork.vertx.ObservableReadStream;
@@ -180,13 +181,17 @@ public class IonStore {
 	 *
 	 * @see #ION_ENCRYPTION_SECRETSTREAM
 	 */
-	private static final String ION_ENCRYPTION = "Ion-Encryption";
+	// Package-private: IonObject reads the descriptor off its own metadata to report the plaintext size.
+	static final String ION_ENCRYPTION = "Ion-Encryption";
 
 	// Value of the Ion-Encryption header: "<scheme>; chunk=<encrypted chunk size>". The scheme names
 	// the AEAD construction; chunk is the size of a full *encrypted* block (plain chunk + auth tag),
 	// which is the value the decrypting side feeds straight into DecryptedWriteStream - no unit
 	// conversion at the point of use. Readers must tolerate unknown parameters and extra whitespace.
 	private static final String ION_ENCRYPTION_SECRETSTREAM = "secretstream/xchacha20poly1305";
+
+	// The chunk parameter of the Ion-Encryption value, with its separator, as it is written and matched.
+	private static final String ION_ENCRYPTION_CHUNK = "chunk=";
 
 	private final Vertx vertx;
 
@@ -317,6 +322,23 @@ public class IonStore {
 			throw new IllegalStateException("Client is closed");
 	}
 
+	// Runs the transfer on a Vert.x context rather than on the caller's thread. The in-memory
+	// destination is backed by BufferWriteStream, which binds to the current context at construction
+	// and refuses to be built off one; arranging that here means a caller on an ordinary thread behaves
+	// the same as one already on a context, which is what put() does too.
+	private <T> Future<T> onContext(Supplier<Future<T>> action) {
+		Promise<T> promise = Promise.promise();
+		vertx.getOrCreateContext().runOnContext(v -> {
+			try {
+				action.get().onComplete(promise);
+			} catch (Throwable t) {
+				promise.fail(t);
+			}
+		});
+
+		return promise.future();
+	}
+
 	public PutRequest put() {
 		return new PutRequest(this);
 	}
@@ -354,26 +376,12 @@ public class IonStore {
 				.recover(IonStore::wrapError);
 	}
 
-	ContextualFuture<IonObject> put(PutRequest request) {
+	Future<IonObject> put(PutRequest request) {
 		closedCheck();
 		// Snapshot up front so mutating the request afterwards cannot disturb an upload in flight,
 		// and so the resolution below is free to fill in derived values (length, probed type, name).
 		PutRequest options = request.dup();
-
-		// Resolve on a Vert.x context, not on the caller's thread: the in-memory sources are backed by
-		// ByteArrayReadStream/BufferReadStream, which bind to the current context at construction and
-		// reject being built off one. Encryption forces every source down that path, so without this a
-		// put from an ordinary thread would fail where the equivalent get succeeds.
-		Promise<IonObject> promise = Promise.promise();
-		vertx.getOrCreateContext().runOnContext(v -> {
-			try {
-				resolveAndUpload(options).onComplete(promise);
-			} catch (Throwable t) {
-				promise.fail(t);
-			}
-		});
-
-		return ContextualFuture.of(promise.future());
+		return onContext(() -> resolveAndUpload(options));
 	}
 
 	// Turns the request's content source into bytes-on-the-wire. Every source funnels into upload(),
@@ -480,7 +488,7 @@ public class IonStore {
 			// Record how the ciphertext is framed so a future reader is not pinned to whatever the
 			// chunk size happened to be at upload time. CHUNK_SIZE is the encrypted block size; the
 			// plain chunk fed to EncryptedReadStream is that minus the per-block tag.
-			request.putHeader(ION_ENCRYPTION, ION_ENCRYPTION_SECRETSTREAM + "; chunk=" + CHUNK_SIZE);
+			request.putHeader(ION_ENCRYPTION, encryptionDescriptor(CHUNK_SIZE));
 		}
 		options.metadata().forEach((k, v) -> {
 			String key = k.regionMatches(true, 0, ION_HEADER_PREFIX, 0, ION_HEADER_PREFIX.length()) ?
@@ -522,190 +530,165 @@ public class IonStore {
 	}
 
 	/**
-	 * Retrieves an object, streaming the integrity-verified payload to the given blocking
-	 * {@link OutputStream}.
+	 * Starts a retrieval of an object held by the bound service.
 	 * <p>
-	 * The stream is written on a worker thread, flushed when the transfer completes, and <b>not</b>
-	 * closed by this method: the caller retains ownership. Note that, unlike the file variant, the
-	 * destination cannot be rolled back - if the integrity check fails, the (corrupt) bytes will
-	 * already have been written before the returned future fails.
-	 *
-	 * @param id  the object reference id (must not be {@code null})
-	 * @param dst the destination output stream (must not be {@code null})
-	 * @return a future completing with the object metadata, or {@code null} if the object was not found
-	 */
-	public ContextualFuture<Optional<IonObject>> get(Id id, OutputStream dst) {
-		Objects.requireNonNull(id, "id");
-		Objects.requireNonNull(dst, "dst");
-		return get(id, new AsyncOutputStream(vertx, dst, false));
-	}
-
-	/**
-	 * Retrieves a federated object, streaming the integrity-verified payload to the given blocking
-	 * {@link OutputStream} (see {@link #get(Id, OutputStream)} and {@link #get(Id, Id, WriteStream)}).
-	 *
-	 * @param peerId the peer id of the Ion Store node holding the object (must not be {@code null})
-	 * @param id     the object reference id (must not be {@code null})
-	 * @param dst    the destination output stream (must not be {@code null})
-	 * @return a future completing with the object metadata, or {@code null} if the object was not found
-	 */
-	public ContextualFuture<Optional<IonObject>> get(Id peerId, Id id, OutputStream dst) {
-		Objects.requireNonNull(peerId, "peerId");
-		Objects.requireNonNull(id, "id");
-		Objects.requireNonNull(dst, "dst");
-		return get(peerId, id, new AsyncOutputStream(vertx, dst, false));
-	}
-
-	/**
-	 * Retrieves an object, streaming the integrity-verified payload to the given WriteStream.
-	 * <p>
-	 * The destination is ended when the transfer completes. The returned metadata is derived from the
-	 * response headers (its {@code name}/{@code contentType} may be {@code null} if the service did not
-	 * advertise them).
-	 *
-	 * @param id  the object reference id (must not be {@code null})
-	 * @param dst the destination write stream (must not be {@code null})
-	 * @return a future completing with the object metadata, or {@code null} if the object was not found
-	 */
-	public ContextualFuture<Optional<IonObject>> get(Id id, WriteStream<Buffer> dst) {
-		Objects.requireNonNull(id, "id");
-		Objects.requireNonNull(dst, "dst");
-		closedCheck();
-		return ContextualFuture.of(download(uri("/objects/" + id), servicePeerId, id, dst).recover(IonStore::wrapError));
-	}
-
-	/**
-	 * Retrieves an object held by a remote peer (federation), streaming the integrity-verified payload
-	 * to the given WriteStream. The bound service fetches and caches the object from the named peer.
-	 *
-	 * @param peerId the peer id of the Ion Store node holding the object (must not be {@code null})
-	 * @param id     the object reference id (must not be {@code null})
-	 * @param dst    the destination write stream (must not be {@code null})
-	 * @return a future completing with the object metadata, or {@code null} if the object was not found
-	 */
-	public ContextualFuture<Optional<IonObject>> get(Id peerId, Id id, WriteStream<Buffer> dst) {
-		Objects.requireNonNull(peerId, "peerId");
-		Objects.requireNonNull(id, "id");
-		Objects.requireNonNull(dst, "dst");
-		closedCheck();
-		return ContextualFuture.of(download(uri("/objects/" + peerId + "/" + id), peerId, id, dst).recover(IonStore::wrapError));
-	}
-
-	/**
-	 * Retrieves an object to a file. The integrity-verified payload is written to {@code file}; on any
-	 * failure (including an integrity mismatch) or when the object is not found, the file is removed.
-	 *
-	 * @param id   the object reference id (must not be {@code null})
-	 * @param file the destination file (must not be {@code null})
-	 * @return a future completing with the object metadata, or {@code null} if the object was not found
-	 */
-	public ContextualFuture<Optional<IonObject>> get(Id id, Path file) {
-		Objects.requireNonNull(id, "id");
-		Objects.requireNonNull(file, "file");
-		closedCheck();
-		return ContextualFuture.of(downloadToFile(uri("/objects/" + id), servicePeerId, id, file).recover(IonStore::wrapError));
-	}
-
-	/**
-	 * Retrieves a federated object to a file (see {@link #get(Id, Path)} and
-	 * {@link #get(Id, Id, WriteStream)}).
-	 *
-	 * @param peerId the peer id of the Ion Store node holding the object (must not be {@code null})
-	 * @param id     the object reference id (must not be {@code null})
-	 * @param file   the destination file (must not be {@code null})
-	 * @return a future completing with the object metadata, or {@code null} if the object was not found
-	 */
-	public ContextualFuture<Optional<IonObject>> get(Id peerId, Id id, Path file) {
-		Objects.requireNonNull(peerId, "peerId");
-		Objects.requireNonNull(id, "id");
-		Objects.requireNonNull(file, "file");
-		closedCheck();
-		return ContextualFuture.of(downloadToFile(uri("/objects/" + peerId + "/" + id), peerId, id, file).recover(IonStore::wrapError));
-	}
-
-	/**
-	 * Retrieves an object into memory, returning a {@link BytesIonObject} that carries both the
-	 * metadata and the integrity-verified payload. Prefer a streaming variant for large objects.
+	 * The returned {@link GetRequest} is configured and then dispatched by naming a destination; see
+	 * {@link GetRequest} for the shape of the API and for what each destination returns.
 	 *
 	 * @param id the object reference id (must not be {@code null})
-	 * @return a future completing with the in-memory object, or {@code null} if it was not found
+	 * @return a retrieval request to configure and dispatch
 	 */
-	public ContextualFuture<Optional<BytesIonObject>> get(Id id) {
+	public GetRequest get(Id id) {
 		Objects.requireNonNull(id, "id");
-		closedCheck();
-		return ContextualFuture.of(downloadToMemory(uri("/objects/" + id), servicePeerId, id).recover(IonStore::wrapError));
+		return new GetRequest(this, null, id);
 	}
 
 	/**
-	 * Retrieves a federated object into memory (see {@link #get(Id)} and
-	 * {@link #get(Id, Id, WriteStream)}).
+	 * Starts a retrieval of a federated object: one held by a remote peer, which the bound service
+	 * fetches and caches on demand (see {@link #get(Id)}).
 	 *
 	 * @param peerId the peer id of the Ion Store node holding the object (must not be {@code null})
 	 * @param id     the object reference id (must not be {@code null})
-	 * @return a future completing with the in-memory object, or {@code null} if it was not found
+	 * @return a retrieval request to configure and dispatch
 	 */
-	public ContextualFuture<Optional<BytesIonObject>> get(Id peerId, Id id) {
+	public GetRequest get(Id peerId, Id id) {
 		Objects.requireNonNull(peerId, "peerId");
 		Objects.requireNonNull(id, "id");
+		return new GetRequest(this, peerId, id);
+	}
+
+	// The entry points behind GetRequest's destinations. Each one owns the setup its destination needs
+	// and then hands off to the single download() below, which is where the wire protocol - integrity
+	// check included - lives.
+
+	Future<Optional<BytesIonObject>> getToBytes(@Nullable Id peerId, Id id, byte @Nullable [] key, boolean raw) {
 		closedCheck();
-		return ContextualFuture.of(downloadToMemory(uri("/objects/" + peerId + "/" + id), peerId, id).recover(IonStore::wrapError));
+		return onContext(() -> {
+			BufferWriteStream ws = new BufferWriteStream();
+			return download(peerId, id, key, raw, ws).compose(meta -> meta.isEmpty() ?
+					Future.succeededFuture(Optional.<BytesIonObject>empty()) :
+					ws.getBuffer().map(buf -> meta.map(o -> new BytesIonObject(o, buf))));
+		}).recover(IonStore::wrapError);
 	}
 
-	private Future<Optional<BytesIonObject>> downloadToMemory(String uri, Id ownerPeerId, Id id) {
-		BufferWriteStream ws = new BufferWriteStream();
-		return download(uri, ownerPeerId, id, ws)
-				.map(meta -> meta.map(ionObject -> new BytesIonObject(ionObject, ws.toBuffer())));
+	Future<Optional<IonObject>> getToBuffer(@Nullable Id peerId, Id id, byte @Nullable [] key, boolean raw,
+			Buffer buffer) {
+		closedCheck();
+		return onContext(() -> download(peerId, id, key, raw, new BufferWriteStream(buffer)))
+				.recover(IonStore::wrapError);
 	}
 
-	private Future<Optional<IonObject>> downloadToFile(String uri, Id ownerPeerId, Id id, Path file) {
-		String fp = file.toString();
-		return vertx.fileSystem()
-				.open(fp, new OpenOptions().setWrite(true).setCreate(true).setTruncateExisting(true))
-				.compose(af -> download(uri, ownerPeerId, id, af)
-						.recover(e -> closeAndDelete(af, fp).transform(x -> Future.failedFuture(e)))
-						.compose(meta -> meta.isPresent() ?
-								Future.succeededFuture(meta) :
-								closeAndDelete(af, fp).map(meta)));
+	Future<Optional<IonObject>> getToFile(@Nullable Id peerId, Id id, byte @Nullable [] key, boolean raw,
+			Path file) {
+		closedCheck();
+		return onContext(() -> {
+			String path = file.toString();
+			return vertx.fileSystem()
+					.open(path, new OpenOptions().setWrite(true).setCreate(true).setTruncateExisting(true))
+					// A file that was created for an object that turns out to be missing, or that holds a
+					// partial or corrupt payload, is worse than no file at all - roll it back either way.
+					.compose(af -> download(peerId, id, key, raw, af)
+							.recover(e -> closeAndDelete(af, path).transform(x -> Future.failedFuture(e)))
+							.compose(meta -> meta.isPresent() ?
+									Future.succeededFuture(meta) :
+									closeAndDelete(af, path).map(meta)));
+		}).recover(IonStore::wrapError);
 	}
 
-	// Streams the verified payload to dst. On HTTP 200 the content is hashed while piping and checked
-	// against the advertised Ion-Content-Id; on 404 the body is drained and null is returned.
-	private Future<Optional<IonObject>> download(String uri, Id ownerPeerId, Id id, WriteStream<Buffer> dst) {
+	Future<Optional<IonObject>> getToOutputStream(@Nullable Id peerId, Id id, byte @Nullable [] key, boolean raw,
+			OutputStream stream, boolean closeStream) {
+		closedCheck();
+		return onContext(() -> {
+			AsyncOutputStream out = new AsyncOutputStream(vertx, stream, closeStream);
+			// pipeTo() ends the destination only when a transfer actually ran: a miss, or a failure
+			// raised from the response headers, leaves it untouched - and a stream this client was asked
+			// to close still has to be closed. end() is idempotent, so this is a no-op after a completed
+			// transfer, and the original outcome is propagated either way.
+			return download(peerId, id, key, raw, out).transform(ar -> out.end().transform(x ->
+					ar.succeeded() ? Future.succeededFuture(ar.result()) : Future.failedFuture(ar.cause())));
+		}).recover(IonStore::wrapError);
+	}
+
+	// The one destination this client does not own: a caller's WriteStream is left exactly as pipeTo()
+	// left it - ended on a completed transfer, untouched otherwise - so the caller keeps the choice.
+	Future<Optional<IonObject>> getToWriteStream(@Nullable Id peerId, Id id, byte @Nullable [] key, boolean raw,
+			WriteStream<Buffer> stream) {
+		closedCheck();
+		return onContext(() -> download(peerId, id, key, raw, stream)).recover(IonStore::wrapError);
+	}
+
+	// Streams the payload to dst, decrypting on the way when a key is given. On HTTP 200 the content is
+	// hashed while it pipes and checked against the advertised Ion-Content-Id; the hash covers the bytes
+	// as they arrive, which for an encrypted object is the ciphertext - exactly what the put side
+	// committed to. On 404 the body is drained and an empty result is returned.
+	private Future<Optional<IonObject>> download(@Nullable Id peerId, Id id, byte @Nullable [] key, boolean raw,
+			WriteStream<Buffer> dst) {
+		Id ownerPeerId = peerId == null ? servicePeerId : peerId;
+		String uri = peerId == null ? uri("/objects/" + id) : uri("/objects/" + peerId + "/" + id);
+
 		return httpClient.request(requestOptions(HttpMethod.GET, uri))
 				.compose(HttpClientRequest::send)
 				.compose(response -> {
 					int statusCode = response.statusCode();
-					if (statusCode == 200) {
-						String cid = response.headers().get(ION_CONTENT_ID);
-						if (cid == null)
-							return drainAndFail(response, new ObjectIntegrityException("Missing Ion-Content-Id header"));
-						Id expectedContentId;
-						try {
-							expectedContentId = Id.of(cid);
-						} catch (IllegalArgumentException e) {
-							return drainAndFail(response, new ObjectIntegrityException("Malformed Ion-Content-Id header: " + cid));
-						}
-
-						MessageDigest md = Hash.sha256();
-						AtomicLong size = new AtomicLong();
-						ReadStream<Buffer> observed = new ObservableReadStream<>(response, buf -> {
-							md.update(buf.getBytes());
-							size.addAndGet(buf.length());
-						});
-
-						return observed.pipeTo(dst).compose(v -> {
-							Id actualContentId = Id.of(md.digest());
-							if (!actualContentId.equals(expectedContentId))
-								return Future.failedFuture(new ObjectIntegrityException(
-										"Integrity check failed for object " + id + ": expected content id " +
-												expectedContentId + ", computed " + actualContentId));
-							return Future.succeededFuture(Optional.of(ionObjectFromHeaders(ownerPeerId, id, response, size.get())));
-						});
-					} else if (statusCode == 404) {
+					if (statusCode == 404)
 						return Future.succeededFuture(Optional.empty());
-					} else {
+					if (statusCode != 200)
 						return failFromResponse(response);
+
+					String cid = response.headers().get(ION_CONTENT_ID);
+					if (cid == null)
+						return drainAndFail(response, new ObjectIntegrityException("Missing Ion-Content-Id header"));
+					Id expectedContentId;
+					try {
+						expectedContentId = Id.of(cid);
+					} catch (IllegalArgumentException e) {
+						return drainAndFail(response, new ObjectIntegrityException("Malformed Ion-Content-Id header: " + cid));
 					}
+
+					boolean encrypted = Boolean.parseBoolean(response.headers().get(ION_ENCRYPTED));
+
+					// The request and the object have to agree about encryption. Silently ignoring a
+					// mismatch either way hands the caller bytes that are not what they asked for: the
+					// unreadable ciphertext of an object they have no key for, or plaintext from a get
+					// they wrote as though it were confidential. raw() is how a caller opts out of the
+					// whole question and takes the stored bytes as they are.
+					WriteStream<Buffer> target = dst;
+					if (!raw) {
+						if (encrypted) {
+							if (key == null)
+								return drainAndFail(response, new DecryptionException(
+										"Object " + id + " is encrypted; supply its key with decrypt(), or ask " +
+												"for the stored bytes with raw()"));
+
+							int chunkSize;
+							try {
+								chunkSize = parseEncryptionDescriptor(response.headers().get(ION_ENCRYPTION));
+							} catch (DecryptionException e) {
+								return drainAndFail(response, e);
+							}
+
+							target = new DecryptedWriteStream(dst, key, chunkSize, null);
+						} else if (key != null) {
+							return drainAndFail(response, new DecryptionException(
+									"Object " + id + " is not encrypted, but a decryption key was supplied"));
+						}
+					}
+
+					MessageDigest md = Hash.sha256();
+					AtomicLong size = new AtomicLong();
+					ReadStream<Buffer> observed = new ObservableReadStream<>(response, buf -> {
+						md.update(buf.getBytes());
+						size.addAndGet(buf.length());
+					});
+
+					return observed.pipeTo(target).compose(v -> {
+						Id actualContentId = Id.of(md.digest());
+						if (!actualContentId.equals(expectedContentId))
+							return Future.failedFuture(new ObjectIntegrityException(
+									"Integrity check failed for object " + id + ": expected content id " +
+											expectedContentId + ", computed " + actualContentId));
+						return Future.succeededFuture(Optional.of(ionObjectFromHeaders(ownerPeerId, id, response, size.get())));
+					});
 				});
 	}
 
@@ -924,6 +907,49 @@ public class IonStore {
 		return isReserved(name) || name.equalsIgnoreCase(ION_ENCRYPTION);
 	}
 
+	// Builds the Ion-Encryption value for a payload framed in encryptedChunkSize-byte ciphertext blocks.
+	private static String encryptionDescriptor(int encryptedChunkSize) {
+		return ION_ENCRYPTION_SECRETSTREAM + "; " + ION_ENCRYPTION_CHUNK + encryptedChunkSize;
+	}
+
+	// Reads back what encryptionDescriptor wrote and returns the ciphertext chunk size to frame
+	// decryption with - the value DecryptedWriteStream takes, so no unit conversion at the point of use.
+	// Paired with encryptionDescriptor deliberately: the format is written in one place and parsed in
+	// another, and this is the seam where they have to agree. Surrounding whitespace and unrecognized
+	// parameters are tolerated, since the value travels as an ordinary HTTP header and is expected to
+	// grow. An absent descriptor means the object predates it and was framed with CHUNK_SIZE.
+	static int parseEncryptionDescriptor(@Nullable String descriptor) throws DecryptionException {
+		if (descriptor == null)
+			return CHUNK_SIZE;
+
+		String[] parts = descriptor.split(";");
+		if (!parts[0].trim().equalsIgnoreCase(ION_ENCRYPTION_SECRETSTREAM))
+			throw new DecryptionException("Unsupported encryption scheme: " + descriptor);
+
+		for (int i = 1; i < parts.length; i++) {
+			String param = parts[i].trim();
+			if (!param.regionMatches(true, 0, ION_ENCRYPTION_CHUNK, 0, ION_ENCRYPTION_CHUNK.length()))
+				continue;
+
+			int chunkSize;
+			String value = param.substring(ION_ENCRYPTION_CHUNK.length()).trim();
+			try {
+				chunkSize = Integer.parseInt(value);
+			} catch (NumberFormatException e) {
+				throw new DecryptionException("Malformed encryption chunk size: " + param);
+			}
+
+			// A ciphertext block is a plaintext block plus its authentication tag, so a size at or below
+			// the tag size is not something EncryptedReadStream could have produced.
+			if (chunkSize <= SecretStream.ABYTES)
+				throw new DecryptionException("Invalid encryption chunk size: " + chunkSize);
+
+			return chunkSize;
+		}
+
+		throw new DecryptionException("Encryption descriptor carries no chunk size: " + descriptor);
+	}
+
 	// Reads and discards the response body (releasing the connection), then fails with the given error.
 	private static <T> Future<T> drainAndFail(HttpClientResponse response, Throwable error) {
 		return response.body().transform(ar -> Future.failedFuture(error));
@@ -964,8 +990,19 @@ public class IonStore {
 	}
 
 	private Future<Void> closeAndDelete(AsyncFile af, String file) {
-		return af.close()
-				.transform(x -> vertx.fileSystem().delete(file))
+		// A rollback can be triggered by a check that runs after the transfer itself succeeded - and
+		// pipeTo() ends the destination on success, which for an AsyncFile means closing it. Closing a
+		// second time throws rather than failing a future, so without this the exception would escape
+		// the rollback: the real error would be replaced by "File handle is closed", and the file that
+		// was supposed to be deleted would be left behind.
+		Future<Void> closed;
+		try {
+			closed = af.close();
+		} catch (IllegalStateException alreadyClosed) {
+			closed = Future.succeededFuture();
+		}
+
+		return closed.transform(x -> vertx.fileSystem().delete(file))
 				.transform(x -> Future.succeededFuture());
 	}
 
@@ -1290,46 +1327,6 @@ public class IonStore {
 			} catch (NullPointerException | IllegalArgumentException e) {
 				throw new IllegalStateException("Invalid IonStore configuration: " + e.getMessage(), e);
 			}
-		}
-	}
-
-	// A minimal in-memory WriteStream<Buffer> used by the in-memory download variants.
-	private static final class BufferWriteStream implements WriteStream<Buffer> {
-		private final Buffer buffer = Buffer.buffer();
-
-		Buffer toBuffer() {
-			return buffer;
-		}
-
-		@Override
-		public WriteStream<Buffer> exceptionHandler(@Nullable Handler<Throwable> handler) {
-			return this;
-		}
-
-		@Override
-		public Future<Void> write(Buffer data) {
-			buffer.appendBuffer(data);
-			return Future.succeededFuture();
-		}
-
-		@Override
-		public Future<Void> end() {
-			return Future.succeededFuture();
-		}
-
-		@Override
-		public WriteStream<Buffer> setWriteQueueMaxSize(int maxSize) {
-			return this;
-		}
-
-		@Override
-		public boolean writeQueueFull() {
-			return false;
-		}
-
-		@Override
-		public WriteStream<Buffer> drainHandler(@Nullable Handler<Void> handler) {
-			return this;
 		}
 	}
 }
