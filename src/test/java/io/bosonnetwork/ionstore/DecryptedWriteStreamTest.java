@@ -45,6 +45,71 @@ public class DecryptedWriteStreamTest {
 	}
 
 	// ---------------------------------------------------------------------
+	// Size arithmetic
+	// ---------------------------------------------------------------------
+
+	@Test
+	void testPlainTextSizeInvertsCipherTextSize() {
+		int plainChunk = EncryptedReadStream.DEFAULT_CHUNK_SIZE;
+		int encryptedChunk = plainChunk + SecretStream.ABYTES;
+
+		// Boundaries either side of every framing transition, plus the sizes where the ciphertext
+		// total lands just past a multiple of the encrypted chunk size while the body has not - the
+		// case that breaks if the header is not taken off before the division.
+		for (long plain : new long[] {
+				0, 1, 2,
+				plainChunk - 42, plainChunk - 41, plainChunk - 25, plainChunk - 24, plainChunk - 11,
+				plainChunk - 1, plainChunk, plainChunk + 1,
+				2L * plainChunk - 1, 2L * plainChunk, 2L * plainChunk + 1,
+				7L * plainChunk + 12345 }) {
+			long cipher = EncryptedReadStream.getCipherTextSize(plain, plainChunk);
+			assertEquals(plain, DecryptedWriteStream.getPlainTextSize(cipher, encryptedChunk),
+					"round-trip must be exact for a plaintext of " + plain + " bytes");
+		}
+	}
+
+	@Test
+	void testPlainTextSizeMatchesActualCipherTextLength() throws Exception {
+		byte[] key = randomKey();
+		int plainChunk = 1024;
+		int encryptedChunk = plainChunk + SecretStream.ABYTES;
+
+		for (int plainLen : new int[] { 0, 1, 1023, 1024, 1025, 2048, 3000 }) {
+			byte[] cipher = encrypt(randomBytes(plainLen), plainChunk, key, null);
+			assertEquals(cipher.length, EncryptedReadStream.getCipherTextSize(plainLen, plainChunk),
+					"predicted ciphertext size must match the bytes actually emitted");
+			assertEquals(plainLen, DecryptedWriteStream.getPlainTextSize(cipher.length, encryptedChunk),
+					"plaintext size must be recoverable from the emitted ciphertext length");
+		}
+	}
+
+	@Test
+	void testPlainTextSizeRejectsUnreachableSizes() {
+		// Below the minimum (header + a tag for the always-present final block).
+		assertThrows(IllegalArgumentException.class, () -> DecryptedWriteStream.getPlainTextSize(0));
+		assertThrows(IllegalArgumentException.class,
+				() -> DecryptedWriteStream.getPlainTextSize(SecretStream.HEADER_BYTES));
+		assertThrows(IllegalArgumentException.class,
+				() -> DecryptedWriteStream.getPlainTextSize(SecretStream.HEADER_BYTES + SecretStream.ABYTES - 1));
+
+		// A body that is an exact multiple of the encrypted chunk size leaves no room for the final
+		// block, so no encrypted stream can have that length.
+		assertThrows(IllegalArgumentException.class, () -> DecryptedWriteStream.getPlainTextSize(
+				SecretStream.HEADER_BYTES + DecryptedWriteStream.DEFAULT_ENCRYPTED_CHUNK_SIZE));
+
+		assertThrows(IllegalArgumentException.class,
+				() -> DecryptedWriteStream.getPlainTextSize(1024, SecretStream.ABYTES));
+	}
+
+	@Test
+	void testSizeHelpersAcceptNonPositiveChunkSizeAsDefault() {
+		assertEquals(EncryptedReadStream.getCipherTextSize(5000, EncryptedReadStream.DEFAULT_CHUNK_SIZE),
+				EncryptedReadStream.getCipherTextSize(5000, 0));
+		assertEquals(DecryptedWriteStream.getPlainTextSize(5000, DecryptedWriteStream.DEFAULT_ENCRYPTED_CHUNK_SIZE),
+				DecryptedWriteStream.getPlainTextSize(5000, -1));
+	}
+
+	// ---------------------------------------------------------------------
 	// Helpers
 	// ---------------------------------------------------------------------
 
