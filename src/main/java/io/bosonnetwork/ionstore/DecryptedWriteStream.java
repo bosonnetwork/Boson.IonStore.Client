@@ -220,4 +220,63 @@ public class DecryptedWriteStream implements WriteStream<Buffer> {
             }
         } catch (Exception ignore) {}
     }
+
+    /**
+     * Returns the plaintext length carried by a ciphertext of the given total size: the exact
+     * inverse of {@link EncryptedReadStream#getCipherTextSize(long, int)}.
+     * <p>
+     * Note the asymmetry in the chunk-size argument. This method takes the <em>encrypted</em>
+     * chunk size - the same value the constructor takes - whereas {@code getCipherTextSize} takes
+     * the <em>plain</em> chunk size. The two differ by {@link SecretStream#ABYTES}, so
+     * {@code getPlainTextSize(getCipherTextSize(n, p), p + SecretStream.ABYTES) == n}.
+     *
+     * <p>Not every size is a reachable ciphertext length: after the header, the trailing partial
+     * block must carry at least a {@link SecretStream#ABYTES}-byte tag. Sizes that could not have
+     * been produced by {@link EncryptedReadStream} are rejected, which makes this usable as a
+     * cheap sanity check on a length advertised by a peer.
+     *
+     * @param cipherTextSize     the total ciphertext length in bytes, header included (the
+     *                           smallest valid value is {@code HEADER_BYTES + ABYTES}, an empty
+     *                           plaintext)
+     * @param encryptedChunkSize the size of a full <em>encrypted</em> chunk; a non-positive value
+     *                           means {@link #DEFAULT_ENCRYPTED_CHUNK_SIZE}
+     * @return the plaintext length in bytes
+     * @throws IllegalArgumentException if {@code encryptedChunkSize} leaves no room for a tag, or
+     *                                  if {@code cipherTextSize} is not a length
+     *                                  {@link EncryptedReadStream} could have produced
+     */
+    public static long getPlainTextSize(long cipherTextSize, int encryptedChunkSize) {
+        encryptedChunkSize = encryptedChunkSize > 0 ? encryptedChunkSize : DEFAULT_ENCRYPTED_CHUNK_SIZE;
+        if (encryptedChunkSize <= SecretStream.ABYTES)
+            throw new IllegalArgumentException("encryptedChunkSize must be > " + SecretStream.ABYTES);
+
+        if (cipherTextSize < SecretStream.HEADER_BYTES + SecretStream.ABYTES)
+            throw new IllegalArgumentException("cipherTextSize must be >= " +
+                    (SecretStream.HEADER_BYTES + SecretStream.ABYTES));
+
+        // The body is n full blocks of encryptedChunkSize plus a final block of (remainder + tag).
+        // The final block is always present and is strictly shorter than a full block, so the
+        // integer division recovers n exactly - but only once the header is taken off first.
+        long body = cipherTextSize - SecretStream.HEADER_BYTES;
+        long fullBlocks = body / encryptedChunkSize;
+        if (body % encryptedChunkSize < SecretStream.ABYTES)
+            throw new IllegalArgumentException("Invalid cipherTextSize: " + cipherTextSize +
+                    " is not a ciphertext length for an encrypted chunk size of " + encryptedChunkSize);
+
+        return body - (fullBlocks + 1) * SecretStream.ABYTES;
+    }
+
+    /**
+     * Returns the plaintext length carried by a ciphertext of the given total size, using the
+     * {@link #DEFAULT_ENCRYPTED_CHUNK_SIZE default encrypted chunk size}.
+     *
+     * @param cipherTextSize the total ciphertext length in bytes, header included
+     * @return the plaintext length in bytes
+     * @throws IllegalArgumentException if {@code cipherTextSize} is not a length
+     *                                  {@link EncryptedReadStream} could have produced
+     * @see #getPlainTextSize(long, int)
+     */
+    public static long getPlainTextSize(long cipherTextSize) {
+        return getPlainTextSize(cipherTextSize, DEFAULT_ENCRYPTED_CHUNK_SIZE);
+    }
 }

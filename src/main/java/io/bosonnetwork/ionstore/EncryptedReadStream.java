@@ -209,4 +209,46 @@ public class EncryptedReadStream implements ReadStream<Buffer> {
 		} catch (Exception ignore) {
 		}
 	}
+
+	/**
+	 * Returns the exact number of bytes this stream emits for a plaintext of the given size, so a
+	 * caller can declare a {@code Content-Length} before the first byte is encrypted.
+	 * <p>
+	 * The framing is a {@link SecretStream#HEADER_BYTES}-byte stream header, followed by
+	 * {@code floor(plainTextSize / chunkSize)} full blocks of {@code chunkSize + }{@link
+	 * SecretStream#ABYTES} bytes, followed by a single final block holding the remaining
+	 * {@code plainTextSize % chunkSize} plaintext bytes plus a tag. The final block is always
+	 * emitted - even for an empty plaintext, which still costs a header plus a tag.
+	 *
+	 * <p>This is the exact inverse of {@link DecryptedWriteStream#getPlainTextSize(long, int)},
+	 * which takes the <em>encrypted</em> chunk size ({@code chunkSize + }{@link
+	 * SecretStream#ABYTES}) rather than the plain chunk size taken here.
+	 *
+	 * @param plainTextSize the plaintext length in bytes (must be {@code >= 0})
+	 * @param chunkSize     the <em>plain</em> chunk size the stream is configured with; a
+	 *                      non-positive value means {@link #DEFAULT_CHUNK_SIZE}, matching the
+	 *                      constructor's fallback
+	 * @return the total ciphertext length in bytes
+	 * @throws IllegalArgumentException if {@code plainTextSize} is negative
+	 */
+	public static long getCipherTextSize(long plainTextSize, int chunkSize) {
+		if (plainTextSize < 0)
+			throw new IllegalArgumentException("plainTextSize must be >= 0");
+
+		chunkSize = chunkSize > 0 ? chunkSize : DEFAULT_CHUNK_SIZE;
+		return SecretStream.HEADER_BYTES + ((plainTextSize / chunkSize) + 1) * SecretStream.ABYTES + plainTextSize;
+	}
+
+	/**
+	 * Returns the ciphertext length for a plaintext of the given size, using the
+	 * {@link #DEFAULT_CHUNK_SIZE default plain chunk size}.
+	 *
+	 * @param plainTextSize the plaintext length in bytes (must be {@code >= 0})
+	 * @return the total ciphertext length in bytes
+	 * @throws IllegalArgumentException if {@code plainTextSize} is negative
+	 * @see #getCipherTextSize(long, int)
+	 */
+	public static long getCipherTextSize(long plainTextSize) {
+		return getCipherTextSize(plainTextSize, DEFAULT_CHUNK_SIZE);
+	}
 }

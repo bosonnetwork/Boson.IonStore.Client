@@ -24,7 +24,6 @@ package io.bosonnetwork.ionstore;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -43,9 +42,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
 
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.file.AsyncFile;
@@ -73,6 +75,7 @@ import io.bosonnetwork.Identity;
 import io.bosonnetwork.crypto.CryptoIdentity;
 import io.bosonnetwork.crypto.Hash;
 import io.bosonnetwork.crypto.HybridTrustManager;
+import io.bosonnetwork.crypto.SecretStream;
 import io.bosonnetwork.crypto.Signature;
 import io.bosonnetwork.cwt.SignedCwt;
 import io.bosonnetwork.ionstore.exceptions.IonStoreException;
@@ -103,6 +106,33 @@ import io.bosonnetwork.web.PaginatedResult;
  * content id covers the whole object, ranged downloads are intentionally not offered - a partial body
  * cannot be verified.
  *
+ * <h2>Encryption</h2>
+ * A put may be encrypted client-side by supplying a key to {@link PutRequest#encrypt(byte[])}. The
+ * service only ever sees ciphertext: the payload is encrypted as it streams, and the key never leaves
+ * the client. Objects encrypted this way carry an {@code Ion-Encrypted} flag and an
+ * {@code Ion-Encryption} descriptor naming the scheme and chunk size, so a reader can frame the
+ * stream correctly without knowing what the writer's defaults were.
+ *
+ * <p><b>Encryption defeats deduplication, by design.</b> The store is content-addressed: an object's
+ * content id is the SHA-256 of the bytes the service received, and identical bytes collapse to one
+ * stored object. Encryption is randomised - every stream begins with a fresh random header - so the
+ * same plaintext encrypts to different ciphertext on every put, yielding a different content id each
+ * time. Two consequences follow:
+ * <ul>
+ *   <li>Uploading identical plaintext twice stores it twice; the service cannot tell the two apart,
+ *       and neither copy is charged against the other's quota.</li>
+ *   <li>A retried put is a <em>new</em> object, not a re-put of the previous one. Callers that retry
+ *       must treat the returned id as authoritative and discard the earlier one.</li>
+ * </ul>
+ * This is the intended trade-off: dropping it would require deterministic encryption, which would
+ * leak plaintext equality to the service. Callers that need dedup across identical plaintexts should
+ * store those objects unencrypted.
+ *
+ * <p>Ciphertext is slightly larger than its plaintext - a one-off stream header plus a per-chunk
+ * authentication tag. {@link EncryptedReadStream#getCipherTextSize(long, int)} gives the exact
+ * expansion, and {@link DecryptedWriteStream#getPlainTextSize(long, int)} inverts it, so the size
+ * reported by the service can be mapped back to the plaintext size a caller cares about.
+ *
  * <h2>Authentication</h2>
  * Object retrieval is permissionless and sends no token. Upload, list, and delete carry a short-lived
  * {@link SignedCwt CWT} bearer token, signed by the device key ({@link Builder#deviceKey}) on behalf
@@ -124,11 +154,12 @@ public class IonStore {
 	// current supported API version prefix
 	private static final String API_VERSION_PREFIX = "/v1";
 
+	protected static final int CHUNK_SIZE = 32 * 1024;
+	protected static final int CHUNK_SIZE_FOR_ENCRYPTION = CHUNK_SIZE - SecretStream.ABYTES;
+
 	// Size threshold for the byte[] put: arrays smaller than this are copied into a single buffer and
 	// sent in one shot; larger arrays are streamed from the array (see put(byte[], PutOptions)).
 	private static final int IN_MEMORY_PUT_THRESHOLD = 1024 * 1024; // 1 MiB
-
-	protected static final int CHUNK_SIZE = 32 * 1024;
 
 	// Ion-* header names (mirrors the service's IonStoreHeaders; redeclared here to avoid depending
 	// on the service module).
@@ -137,6 +168,25 @@ public class IonStore {
 	private static final String ION_ENCRYPTED = "Ion-Encrypted";
 	private static final String ION_EXPIRE_AT = "Ion-Expire-At";
 	private static final String ION_CONTENT_ID = "Ion-Content-Id";
+
+	/**
+	 * Describes how a client-encrypted payload is framed, so a reader can decrypt it without having
+	 * to assume the writer used today's defaults. Emitted on every encrypted put and echoed by the
+	 * service on get.
+	 * <p>
+	 * Deliberately <em>not</em> reserved server-side: the service stores and returns it as ordinary
+	 * {@code Ion-*} object metadata and never interprets it, so the format can evolve without a
+	 * service change. The client sets it itself and ignores any caller-supplied value.
+	 *
+	 * @see #ION_ENCRYPTION_SECRETSTREAM
+	 */
+	private static final String ION_ENCRYPTION = "Ion-Encryption";
+
+	// Value of the Ion-Encryption header: "<scheme>; chunk=<encrypted chunk size>". The scheme names
+	// the AEAD construction; chunk is the size of a full *encrypted* block (plain chunk + auth tag),
+	// which is the value the decrypting side feeds straight into DecryptedWriteStream - no unit
+	// conversion at the point of use. Readers must tolerate unknown parameters and extra whitespace.
+	private static final String ION_ENCRYPTION_SECRETSTREAM = "secretstream/xchacha20poly1305";
 
 	private final Vertx vertx;
 
@@ -244,7 +294,6 @@ public class IonStore {
 		return serviceUrl;
 	}
 
-
 	/**
 	 * Close the client and the underlying {@link HttpClient}.
 	 *
@@ -268,153 +317,36 @@ public class IonStore {
 			throw new IllegalStateException("Client is closed");
 	}
 
-	/**
-	 * Stores an object by streaming the contents of a blocking {@link InputStream}.
-	 * <p>
-	 * The stream is consumed on a worker thread and is <b>not</b> closed by this method: the caller
-	 * retains ownership and must close it once the returned future completes.
-	 *
-	 * @param content the object payload as a blocking input stream (must not be {@code null})
-	 * @param length  the payload length in bytes, or a negative value if unknown (sends chunked)
-	 * @param options the put options (must not be {@code null}; use {@link PutOptions#none()})
-	 * @return a future completing with the stored object's metadata
-	 */
-	public ContextualFuture<IonObject> put(InputStream content, long length, PutOptions options) {
-		Objects.requireNonNull(content, "content");
-		Objects.requireNonNull(options, "options");
-		closedCheck();
-		return put(new AsyncInputStream(vertx, content, CHUNK_SIZE, false), length, options);
+	public PutRequest put() {
+		return new PutRequest(this);
 	}
 
-	/**
-	 * Stores an object by streaming the given content.
-	 *
-	 * @param content the object payload as a read stream (must not be {@code null})
-	 * @param length  the payload length in bytes, or a negative value if unknown (sends chunked)
-	 * @param options the put options (must not be {@code null}; use {@link PutOptions#none()})
-	 * @return a future completing with the stored object's metadata
-	 */
-	public ContextualFuture<IonObject> put(ReadStream<Buffer> content, long length, PutOptions options) {
-		Objects.requireNonNull(content, "content");
-		Objects.requireNonNull(options, "options");
-		closedCheck();
-		return ContextualFuture.of(upload(content, length, options));
+	private Future<IonObject> upload(Buffer content, PutRequest options) {
+		// Client-side upload integrity: hash exactly the bytes we send and verify the server committed to
+		// the same content id (see verifyUploadedContentId), so a corrupted/partial upload fails here.
+		MessageDigest md = Hash.sha256();
+		md.update(content.getBytes());
+		Id expectedContentId = Id.of(md.digest());
+
+		return httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
+				.compose(request -> {
+					applyUploadHeaders(request, options);
+					return request.send(content);
+				})
+				.compose(this::handleUploadResponse)
+				.compose(obj -> verifyUploadedContentId(obj, expectedContentId))
+				.recover(IonStore::wrapError);
 	}
 
-	/**
-	 * Stores an object from a byte array.
-	 * <p>
-	 * The array is consumed asynchronously: small payloads are copied up front, but larger ones are
-	 * read from {@code content} as the upload streams. The caller must therefore not modify
-	 * {@code content} until the returned future completes.
-	 *
-	 * @param content the object payload (must not be {@code null})
-	 * @param options the put options (must not be {@code null}; use {@link PutOptions#none()})
-	 * @return a future completing with the stored object's metadata
-	 */
-	public ContextualFuture<IonObject> put(byte[] content, PutOptions options) {
-		Objects.requireNonNull(content, "content");
-		Objects.requireNonNull(options, "options");
-		closedCheck();
-
-		// The array is already wholly in memory, so streaming it does not reduce the caller's footprint
-		// - it only avoids the single extra copy that Buffer.buffer makes, at the cost of per-chunk
-		// worker-thread hops. That trade-off only pays off for large arrays, so copy-and-send below the
-		// threshold and stream above it.
-		if (content.length < IN_MEMORY_PUT_THRESHOLD)
-			return put(Buffer.buffer(content), options); // Buffer.buffer copies the array
-		else
-			return put(new ByteArrayReadStream(content), content.length, options);
-	}
-
-	/**
-	 * Stores an object held entirely in memory.
-	 *
-	 * @param content the object payload (must not be {@code null})
-	 * @param options the put options (must not be {@code null}; use {@link PutOptions#none()})
-	 * @return a future completing with the stored object's metadata
-	 */
-	public ContextualFuture<IonObject> put(Buffer content, PutOptions options) {
-		Objects.requireNonNull(content, "content");
-		Objects.requireNonNull(options, "options");
-		closedCheck();
-
-		if (content.length() < IN_MEMORY_PUT_THRESHOLD) {
-			// Client-side upload integrity: hash exactly the bytes we send and verify the server committed to
-			// the same content id (see verifyUploadedContentId), so a corrupted/partial upload fails here.
-			MessageDigest md = Hash.sha256();
-			md.update(content.getBytes());
-			Id expectedContentId = Id.of(md.digest());
-
-			Future<IonObject> future = httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
-					.compose(request -> {
-						applyUploadHeaders(request, options, content.length());
-						return request.send(content);
-					})
-					.compose(this::handleUploadResponse)
-					.compose(obj -> verifyUploadedContentId(obj, expectedContentId))
-					.recover(IonStore::wrapError);
-
-			return ContextualFuture.of(future);
-		} else {
-			return put(new BufferReadStream(content), content.length(), options);
-		}
-	}
-
-	/**
-	 * Stores an object by streaming the contents of a file. When the options do not specify a name or
-	 * content type, they default to the file's name and its probed MIME type.
-	 *
-	 * @param file    the file to store (must not be {@code null})
-	 * @param options the put options (must not be {@code null}; use {@link PutOptions#none()})
-	 * @return a future completing with the stored object's metadata
-	 */
-	public ContextualFuture<IonObject> put(Path file, PutOptions options) {
-		Objects.requireNonNull(file, "file");
-		Objects.requireNonNull(options, "options");
-		closedCheck();
-
-		long length;
-		String probedType;
-		try {
-			length = Files.size(file);
-			probedType = Files.probeContentType(file);
-		} catch (IOException e) {
-			return ContextualFuture.failedFuture(new IonStoreException("Cannot read file: " + file, e));
-		}
-
-		PutOptions.Builder b = PutOptions.builder()
-				.ttl(options.getTtl())
-				.encrypted(options.isEncrypted())
-				.metadata(options.getMetadata())
-				.name(options.getName() != null ? options.getName() : file.getFileName().toString());
-		String contentType = options.getContentType() != null ? options.getContentType() : probedType;
-		if (contentType != null)
-			b.contentType(contentType);
-		PutOptions effective = b.build();
-
-		Future<IonObject> future = vertx.fileSystem()
-				.open(file.toString(), new OpenOptions().setRead(true).setWrite(false))
-				.compose(af -> {
-					af.setReadBufferSize(CHUNK_SIZE);
-					// Close the source file once the upload settles, then propagate its original outcome.
-					Future<IonObject> upload = upload(af, length, effective);
-					return upload.transform(ar -> af.close().transform(x -> ar.succeeded() ?
-							Future.succeededFuture(ar.result()) : Future.failedFuture(ar.cause())));
-				});
-
-		return ContextualFuture.of(future);
-	}
-
-	private Future<IonObject> upload(ReadStream<Buffer> content, long length, PutOptions options) {
+	private Future<IonObject> upload(ReadStream<Buffer> stream, PutRequest options) {
 		// Hash the bytes as they stream out and verify the server committed to the same content id, so a
 		// silently corrupted or truncated upload fails here instead of being stored (and later served) as
 		// a valid-looking but broken object. Symmetric to the download-side integrity check.
 		MessageDigest md = Hash.sha256();
-		ReadStream<Buffer> observed = new ObservableReadStream<>(content, buf -> md.update(buf.getBytes()));
+		ReadStream<Buffer> observed = new ObservableReadStream<>(stream, buf -> md.update(buf.getBytes()));
 		return httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
 				.compose(request -> {
-					applyUploadHeaders(request, options, length);
+					applyUploadHeaders(request, options);
 					return request.send(observed);
 				})
 				.compose(this::handleUploadResponse)
@@ -422,37 +354,144 @@ public class IonStore {
 				.recover(IonStore::wrapError);
 	}
 
-	// Fails the upload if the object the server stored does not carry the content id computed over the
-	// bytes we actually sent (a partial or corrupted upload). The orphaned server object, if any, is
-	// left to expire by its TTL.
-	private Future<IonObject> verifyUploadedContentId(IonObject obj, Id expectedContentId) {
-		if (!expectedContentId.equals(obj.getContentId()))
-			return Future.failedFuture(new ObjectIntegrityException(
-					"Upload integrity check failed for object " + obj.getId() + ": expected content id " +
-							expectedContentId + ", server stored " + obj.getContentId()));
-		return Future.succeededFuture(obj);
-	}
+	ContextualFuture<IonObject> put(PutRequest request) {
+		closedCheck();
+		// Snapshot up front so mutating the request afterwards cannot disturb an upload in flight,
+		// and so the resolution below is free to fill in derived values (length, probed type, name).
+		PutRequest options = request.dup();
 
-	private void applyUploadHeaders(HttpClientRequest request, PutOptions options, long length) {
-		request.putHeader("Authorization", "Bearer " + getAccessToken());
-		request.putHeader("Content-Type", options.getContentType() != null ?
-				options.getContentType() : "application/octet-stream");
-		if (options.getName() != null)
-			request.putHeader("Content-Disposition", contentDisposition(options.getName()));
-		if (options.getTtl() > 0)
-			request.putHeader(ION_TTL, Long.toString(options.getTtl()));
-		if (options.isEncrypted())
-			request.putHeader(ION_ENCRYPTED, "true");
-		options.getMetadata().forEach((k, v) -> {
-			String name = k.regionMatches(true, 0, ION_HEADER_PREFIX, 0, ION_HEADER_PREFIX.length()) ?
-					k : ION_HEADER_PREFIX + k;
-			// never let custom metadata override the reserved/server-managed headers
-			if (!isReserved(name))
-				request.putHeader(name, String.valueOf(v));
+		// Resolve on a Vert.x context, not on the caller's thread: the in-memory sources are backed by
+		// ByteArrayReadStream/BufferReadStream, which bind to the current context at construction and
+		// reject being built off one. Encryption forces every source down that path, so without this a
+		// put from an ordinary thread would fail where the equivalent get succeeds.
+		Promise<IonObject> promise = Promise.promise();
+		vertx.getOrCreateContext().runOnContext(v -> {
+			try {
+				resolveAndUpload(options).onComplete(promise);
+			} catch (Throwable t) {
+				promise.fail(t);
+			}
 		});
 
-		if (length >= 0)
-			request.putHeader("Content-Length", Long.toString(length));
+		return ContextualFuture.of(promise.future());
+	}
+
+	// Turns the request's content source into bytes-on-the-wire. Every source funnels into upload(),
+	// which is the single place encryption and the declared content length are applied - so the two
+	// stay in step no matter where the payload came from.
+	private Future<IonObject> resolveAndUpload(PutRequest options) {
+		return switch (options.contentSource()) {
+			case EMPTY -> Future.failedFuture(new IllegalStateException("Empty content"));
+
+			case BYTES -> {
+				byte[] bytes = options.content();
+				yield uploadInMemory(bytes.length, options, () -> Buffer.buffer(bytes),
+						chunkSize -> new ByteArrayReadStream(bytes, 0, bytes.length, chunkSize));
+			}
+
+			case BUFFER -> {
+				Buffer buf = options.content();
+				yield uploadInMemory(buf.length(), options, () -> buf,
+						chunkSize -> new BufferReadStream(buf, 0, buf.length(), chunkSize));
+			}
+
+			case FILE -> {
+				Path file = options.content();
+				long length;
+				try {
+					length = Files.size(file);
+					// A file names and types itself, unless the caller said otherwise.
+					if (options.contentType() == null) {
+						String contentType = Files.probeContentType(file);
+						if (contentType != null)
+							options.contentType(contentType);
+					}
+					if (options.name() == null)
+						options.name(file.getFileName().toString());
+				} catch (IOException e) {
+					yield Future.failedFuture(new IonStoreException("Cannot read file: " + file, e));
+				}
+
+				yield vertx.fileSystem()
+						.open(file.toString(), new OpenOptions().setRead(true).setWrite(false))
+						.compose(af -> {
+							af.setReadBufferSize(sourceChunkSize(options));
+							// Close the source file once the upload settles, then propagate its original outcome.
+							return uploadStream(af, length, options).transform(ar -> af.close().transform(x ->
+									ar.succeeded() ? Future.succeededFuture(ar.result()) :
+											Future.failedFuture(ar.cause())));
+						});
+			}
+
+			case INPUT_STREAM -> uploadStream(
+					new AsyncInputStream(vertx, options.content(), sourceChunkSize(options), options.closeContent()),
+					options.contentLength(), options);
+
+			case READ_STREAM -> uploadStream(options.content(), options.contentLength(), options);
+		};
+	}
+
+	// An in-memory payload is already whole in the caller's heap, so streaming it does not reduce the
+	// footprint - it only avoids the single copy Buffer.buffer makes, at the cost of per-chunk context
+	// hops. That trade-off only pays off for large payloads, so send small ones in one shot and stream
+	// the rest. Encryption always streams, whatever the size.
+	private Future<IonObject> uploadInMemory(long length, PutRequest options, Supplier<Buffer> whole,
+			IntFunction<ReadStream<Buffer>> streamed) {
+		if (options.encryptionKey() == null && length < IN_MEMORY_PUT_THRESHOLD) {
+			options.contentLength(length);
+			return upload(whole.get(), options);
+		}
+
+		return uploadStream(streamed.apply(sourceChunkSize(options)), length, options);
+	}
+
+	// The one place encryption is applied. Wrapping here (rather than per content source) keeps the
+	// declared content length in step with the bytes that actually go out: an encrypted body is longer
+	// than its plaintext by a stream header plus a per-chunk auth tag.
+	private Future<IonObject> uploadStream(ReadStream<Buffer> source, long plainLength, PutRequest options) {
+		byte[] key = options.encryptionKey();
+		if (key == null) {
+			options.contentLength(plainLength);
+			return upload(source, options);
+		}
+
+		// A length of 0 means "unknown", and stays unknown once encrypted - the upload goes out chunked.
+		options.contentLength(plainLength > 0 ?
+				EncryptedReadStream.getCipherTextSize(plainLength, CHUNK_SIZE_FOR_ENCRYPTION) : 0);
+		return upload(new EncryptedReadStream(source, key, CHUNK_SIZE_FOR_ENCRYPTION, null), options);
+	}
+
+	// Read buffer for a payload source: sized so that one plain chunk encrypts to exactly CHUNK_SIZE.
+	private static int sourceChunkSize(PutRequest options) {
+		return options.encryptionKey() == null ? CHUNK_SIZE : CHUNK_SIZE_FOR_ENCRYPTION;
+	}
+
+	private void applyUploadHeaders(HttpClientRequest request, PutRequest options) {
+		request.putHeader("Authorization", "Bearer " + getAccessToken());
+		request.putHeader("Content-Type", options.contentType() != null ?
+				options.contentType() : "application/octet-stream");
+		String name = options.name();
+		if (name != null)
+			request.putHeader("Content-Disposition", contentDisposition(name));
+		if (options.ttl() > 0)
+			request.putHeader(ION_TTL, Long.toString(options.ttl()));
+		if (options.isEncrypted()) {
+			request.putHeader(ION_ENCRYPTED, "true");
+			// Record how the ciphertext is framed so a future reader is not pinned to whatever the
+			// chunk size happened to be at upload time. CHUNK_SIZE is the encrypted block size; the
+			// plain chunk fed to EncryptedReadStream is that minus the per-block tag.
+			request.putHeader(ION_ENCRYPTION, ION_ENCRYPTION_SECRETSTREAM + "; chunk=" + CHUNK_SIZE);
+		}
+		options.metadata().forEach((k, v) -> {
+			String key = k.regionMatches(true, 0, ION_HEADER_PREFIX, 0, ION_HEADER_PREFIX.length()) ?
+					k : ION_HEADER_PREFIX + k;
+			// never let custom metadata override a header the client sets itself
+			if (!isManagedOnPut(key))
+				request.putHeader(key, String.valueOf(v));
+		});
+
+		if (options.contentLength() > 0)
+			request.putHeader("Content-Length", Long.toString(options.contentLength()));
 		else
 			request.setChunked(true);
 	}
@@ -469,6 +508,17 @@ public class IonStore {
 		}
 
 		return failFromResponse(response);
+	}
+
+	// Fails the upload if the object the server stored does not carry the content id computed over the
+	// bytes we actually sent (a partial or corrupted upload). The orphaned server object, if any, is
+	// left to expire by its TTL.
+	private Future<IonObject> verifyUploadedContentId(IonObject obj, Id expectedContentId) {
+		if (!expectedContentId.equals(obj.getContentId()))
+			return Future.failedFuture(new ObjectIntegrityException(
+					"Upload integrity check failed for object " + obj.getId() + ": expected content id " +
+							expectedContentId + ", server stored " + obj.getContentId()));
+		return Future.succeededFuture(obj);
 	}
 
 	/**
@@ -852,10 +902,26 @@ public class IonStore {
 		return tc.token;
 	}
 
+	// Server-managed Ion-* headers; mirrors the service's IonStoreHeaders.isReserved. Used on both
+	// legs: the service never stores these as object metadata, so neither does the client when it
+	// rebuilds an IonObject from a download's response headers.
 	@SuppressWarnings("BooleanMethodIsAlwaysInverted")
 	private static boolean isReserved(String name) {
 		return name.equalsIgnoreCase(ION_TTL) || name.equalsIgnoreCase(ION_ENCRYPTED)
 				|| name.equalsIgnoreCase(ION_EXPIRE_AT) || name.equalsIgnoreCase(ION_CONTENT_ID);
+	}
+
+	// Ion-* headers the client derives itself on a put and therefore never accepts from caller
+	// metadata: the server-managed ones, plus the encryption descriptor, which has to describe how the
+	// payload was actually encrypted rather than whatever the caller claims.
+	//
+	// Deliberately a separate predicate from isReserved: the service treats ION_ENCRYPTION as ordinary
+	// metadata and echoes it back on GET, and isReserved is what filters those response headers. Adding
+	// ION_ENCRYPTION there would strip the descriptor out of IonObject.getMetadata() - the one place a
+	// reader needs to find it in order to decrypt.
+	@SuppressWarnings("BooleanMethodIsAlwaysInverted")
+	private static boolean isManagedOnPut(String name) {
+		return isReserved(name) || name.equalsIgnoreCase(ION_ENCRYPTION);
 	}
 
 	// Reads and discards the response body (releasing the connection), then fails with the given error.

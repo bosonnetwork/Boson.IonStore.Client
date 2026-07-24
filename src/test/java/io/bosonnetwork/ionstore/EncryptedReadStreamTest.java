@@ -166,6 +166,9 @@ public class EncryptedReadStreamTest {
 
 		assertEquals(SecretStream.HEADER_BYTES, encrypted.get(0).length(),
 				"first emitted buffer must be the SecretStream header");
+		assertEquals(EncryptedReadStream.getCipherTextSize(200, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
+
 	}
 
 	@Test
@@ -181,6 +184,9 @@ public class EncryptedReadStreamTest {
 
 		assertArrayEquals(new byte[0], decrypt(encrypted, key, null),
 				"empty payload must round-trip to empty plaintext");
+		assertEquals(EncryptedReadStream.getCipherTextSize(0, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
+
 	}
 
 	@Test
@@ -194,6 +200,8 @@ public class EncryptedReadStreamTest {
 		assertEquals(plain.length + SecretStream.ABYTES, encrypted.get(1).length(),
 				"final block holds the plaintext plus auth tag, with no padding");
 		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	@Test
@@ -210,6 +218,8 @@ public class EncryptedReadStreamTest {
 		assertEquals(SecretStream.ABYTES, encrypted.get(2).length(),
 				"final block is the tag only when plaintext divides evenly");
 		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	@Test
@@ -224,6 +234,25 @@ public class EncryptedReadStreamTest {
 		assertEquals(DecryptedWriteStream.DEFAULT_ENCRYPTED_CHUNK_SIZE, encrypted.get(2).length());
 		assertEquals(SecretStream.ABYTES, encrypted.get(3).length());
 		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
+	}
+
+	@Test
+	void testExactRandomOfChunkSize() throws Exception {
+		byte[] key = randomKey();
+		int paddingSize = new Random().nextInt(100, 1000);
+		byte[] plain = randomBytes(2 * EncryptedReadStream.DEFAULT_CHUNK_SIZE + paddingSize);
+
+		List<Buffer> encrypted = encrypt(plain, 8192, key);
+
+		assertEquals(4, encrypted.size(), "header + two full chunks + final block");
+		assertEquals(DecryptedWriteStream.DEFAULT_ENCRYPTED_CHUNK_SIZE, encrypted.get(1).length());
+		assertEquals(DecryptedWriteStream.DEFAULT_ENCRYPTED_CHUNK_SIZE, encrypted.get(2).length());
+		assertEquals(SecretStream.ABYTES + paddingSize, encrypted.get(3).length());
+		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	@Test
@@ -253,6 +282,8 @@ public class EncryptedReadStreamTest {
 				totalLength(encrypted));
 
 		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	@Test
@@ -267,6 +298,8 @@ public class EncryptedReadStreamTest {
 		assertEquals(DecryptedWriteStream.DEFAULT_ENCRYPTED_CHUNK_SIZE, encrypted.get(1).length(),
 				"one full plain chunk must accumulate even from 1-byte source reads");
 		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	@Test
@@ -283,6 +316,8 @@ public class EncryptedReadStreamTest {
 					"intermediate chunk " + i + " must be chunkSize + tag");
 		assertEquals(500 + SecretStream.ABYTES, encrypted.get(4).length());
 		assertArrayEquals(plain, decrypt(encrypted, key, null));
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, chunkSize), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	// ---------------------------------------------------------------------
@@ -299,6 +334,8 @@ public class EncryptedReadStreamTest {
 
 		assertArrayEquals(plain, decrypt(encrypted, key, aad),
 				"payload encrypted with AAD must decrypt when the same AAD is supplied");
+		assertEquals(EncryptedReadStream.getCipherTextSize(plain.length, EncryptedReadStream.DEFAULT_CHUNK_SIZE), totalLength(encrypted),
+				"total length must be the sum of the header, plaintext and tag lengths");
 	}
 
 	@Test
