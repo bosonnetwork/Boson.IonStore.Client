@@ -432,7 +432,7 @@ public class IonStore {
 			}
 
 			case INPUT_STREAM -> uploadStream(
-					new AsyncInputStream(vertx, options.content(), sourceChunkSize(options), options.closeContent()),
+					new AsyncInputStream(options.content(), sourceChunkSize(options), options.closeContent()),
 					options.contentLength(), options);
 
 			case READ_STREAM -> uploadStream(options.content(), options.contentLength(), options);
@@ -599,7 +599,7 @@ public class IonStore {
 			OutputStream stream, boolean closeStream) {
 		closedCheck();
 		return onContext(() -> {
-			AsyncOutputStream out = new AsyncOutputStream(vertx, stream, closeStream);
+			AsyncOutputStream out = new AsyncOutputStream(stream, closeStream);
 			// pipeTo() ends the destination only when a transfer actually ran: a miss, or a failure
 			// raised from the response headers, leaves it untouched - and a stream this client was asked
 			// to close still has to be closed. end() is idempotent, so this is a no-op after a completed
