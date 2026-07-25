@@ -21,6 +21,7 @@ The client (`IonStore`) talks to the service over its HTTP API and, unlike a `We
   - [Create a client](#create-a-client)
   - [Put (store an object)](#put-store-an-object)
   - [Get (retrieve an object)](#get-retrieve-an-object)
+  - [Encryption](#encryption)
   - [Metadata, listing, existence, deletion](#metadata-listing-existence-deletion)
   - [Federation](#federation)
 - [API Overview](#api-overview)
@@ -46,8 +47,9 @@ Each object also has an optional file name, content type, TTL (lifetime), an `en
 
 ## Features
 
-- Map-like API: **`put`** to store, **`get`** to retrieve.
+- **Fluent** builder-style API: **`put()`** to store, **`get(id)`** to retrieve — configure the request, then pick a source (`put`) or a destination (`get`).
 - Payload sources/sinks: `byte[]`, Vert.x `Buffer`, `java.nio.file.Path`, `java.io.InputStream`/`OutputStream`, and Vert.x `ReadStream`/`WriteStream`.
+- Optional **client-side encryption** (`put().encrypt(key)`) and transparent **decryption** (`get(id).decrypt(key)`), or take the stored bytes verbatim with `get(id).raw()`.
 - **Integrity-checked** downloads (SHA-256 vs `Ion-Content-Id`).
 - Object **metadata**, **existence check**, paginated **listing**, and **deletion**.
 - **Federated** retrieval from a named peer node.
@@ -131,59 +133,93 @@ store.close().get();
 
 ### Put (store an object)
 
-`put` returns the stored object's metadata as an `IonObject`. Options (name, content type, TTL in seconds, `encrypted` flag, custom `Ion-*` metadata) are supplied via `PutOptions`, or use `PutOptions.none()`.
+`put()` opens a fluent `PutRequest`: describe the object (name, content type, TTL in seconds, custom `Ion-*` metadata, optional encryption), name exactly one payload source with `content(...)`, then call `send()`. It completes with the stored object's metadata as an `IonObject`. Setters are order-independent; a later `content(...)` replaces an earlier one.
 
 ```java
-PutOptions options = PutOptions.builder()
+// From a byte array
+IonObject obj = store.put()
         .name("hello.txt")
         .contentType("text/plain")
         .ttl(3600)                       // seconds; capped by the service maximum, 0 = service default
-        .metadata("Ion-Tag", "greeting") // custom Ion-* metadata
-        .build();
-
-// From a byte array
-IonObject obj = store.put("hello".getBytes(StandardCharsets.UTF_8), options).get();
+        .metadata("Ion-Tag", "greeting") // custom Ion-* metadata (the Ion- prefix is added if missing)
+        .content("hello".getBytes(StandardCharsets.UTF_8))
+        .send()
+        .get();
 System.out.println(obj.getId());        // reference id, for ions:// addressing
 System.out.println(obj.getContentId()); // SHA-256 content id
 System.out.println(obj.getUri());       // ions://<peerId>/<id>
 
-// From a file (name/content type default to the file's)
-IonObject fromFile = store.put(Path.of("/data/photo.jpg"), PutOptions.none()).get();
+// From a file (name/content type default to the file's own)
+IonObject fromFile = store.put().content(Path.of("/data/photo.jpg")).send().get();
 
 // From a Buffer, a blocking InputStream, or any Vert.x ReadStream<Buffer>
-store.put(Buffer.buffer(bytes), PutOptions.none());
-store.put(inputStream, contentLength /* or -1 if unknown */, PutOptions.none());
+store.put().content(Buffer.buffer(bytes)).send();
+store.put().content(inputStream).contentLength(len /* omit if unknown */).send();
 ```
 
-> For the `byte[]` overload, the array is consumed asynchronously: small payloads are copied up front, while larger ones are read from the array as the upload streams. Do not modify the array until the returned future completes. The blocking `InputStream` is **not** closed by the client — the caller retains ownership.
+> **Payload ownership.** A put is asynchronous and the payload is generally **not** copied — it is read as the upload streams — so leave the source alone until the returned future completes: do not modify the array/buffer, do not touch the file, and do not read from the stream. By default the client does **not** close a supplied `InputStream`; pass `content(stream, true)` to hand ownership over. A `ReadStream` is consumed but not closed. The `contentLength(...)` hint applies only to the stream sources (the array, buffer, and file sources measure themselves).
 
 ### Get (retrieve an object)
 
-Retrieval is permissionless. The simplest form loads the integrity-verified bytes into memory and returns a `BytesIonObject` (an `IonObject` that also carries its payload):
+Retrieval is permissionless. `get(id)` opens a fluent `GetRequest`. Unlike `put()`, a get has no separate terminal call — naming the destination **is** the terminal operation, because once the destination is known there is nothing left to configure. Every result is an `Optional`, empty when the object does not exist.
+
+The `toBytes()` destination loads the integrity-verified payload into memory and returns a `BytesIonObject` (an `IonObject` that also carries its payload):
 
 ```java
-BytesIonObject obj = store.get(id).get();
-if (obj != null) {                       // null when the object does not exist
+Optional<BytesIonObject> result = store.get(id).toBytes().get();
+result.ifPresent(obj -> {
     byte[] bytes = obj.getBytes();       // or obj.getContent() for a Buffer
     System.out.println(obj.getContentId() + " / " + obj.getSize());
-}
+});
 ```
 
-For large objects, stream straight to a sink instead of buffering — to a file, a blocking `OutputStream`, or any Vert.x `WriteStream<Buffer>`. These return the object's `IonObject` metadata (or `null` if not found):
+For large objects, stream straight to a destination instead of buffering — a file, a blocking `OutputStream`, a Vert.x `WriteStream<Buffer>`, or a caller-supplied `Buffer` to append to. These complete with the object's `IonObject` metadata (empty if not found):
 
 ```java
-// To a file — the partial file is removed on any failure (including an integrity mismatch)
-store.get(id, Path.of("/tmp/out.bin")).get();
+// To a file - the partial file is removed on any failure (including an integrity mismatch)
+store.get(id).toFile(Path.of("/tmp/out.bin")).get();
 
-// To a blocking OutputStream (not closed by the client)
-store.get(id, outputStream).get();
+// To a blocking OutputStream; by default the client does NOT close it.
+// Pass toOutputStream(stream, true) to have the client close it when the transfer ends.
+store.get(id).toOutputStream(outputStream).get();
+
+// Append to a caller-owned Buffer (only metadata is returned; the payload is in your buffer)
+Buffer sink = Buffer.buffer();
+store.get(id).toBuffer(sink).get();
 ```
+
+### Encryption
+
+The payload can be encrypted client-side so the service only ever sees ciphertext. Supply a `SecretStream.KEY_BYTES`-byte key to `put().encrypt(key)`; the key never leaves the client. The stored object is flagged `Ion-Encrypted` and carries an `Ion-Encryption` descriptor (scheme + chunk size), so it stays decryptable even if the client's defaults change later.
+
+```java
+byte[] key = Random.randomBytes(SecretStream.KEY_BYTES);   // keep this; the service cannot recover it
+
+IonObject stored = store.put().content(plaintext).encrypt(key).send().get();
+stored.isEncrypted();         // true
+stored.getSize();             // the stored (ciphertext) length
+stored.getPlainTextSize();    // the original plaintext length
+```
+
+To read it back, hand the same key to `get(id).decrypt(key)` — the payload is decrypted as it streams, so the destination receives plaintext:
+
+```java
+byte[] plaintext = store.get(id).decrypt(key).toBytes().get().orElseThrow().getBytes();
+```
+
+The request and the object must agree: fetching an encrypted object without `decrypt(key)`, or supplying a key for an object that is not encrypted, fails with `DecryptionException` rather than returning bytes that are not what you asked for. To handle an encrypted object **without** the key — caching, relaying, or copying it to another store — use `raw()`, which yields the stored ciphertext (still integrity-checked) verbatim:
+
+```java
+store.get(id).raw().toFile(Path.of("/tmp/blob.enc")).get();
+```
+
+> **Encryption defeats deduplication by design.** Each encrypted stream begins with a fresh random header, so identical plaintext produces different ciphertext — and therefore a different content id — on every put. A re-uploaded object is a new object, not a dedup hit, which counts against quota.
 
 ### Metadata, listing, existence, deletion
 
 ```java
 // Metadata only, without downloading the payload
-IonObject meta = store.getIonObject(id).get();   // null if not found
+Optional<IonObject> meta = store.getIonObject(id).get();   // empty if not found
 
 // Existence check (HEAD)
 boolean present = store.exists(id).get();
@@ -199,27 +235,51 @@ boolean deleted = store.delete(id).get();        // false if it did not exist
 
 ### Federation
 
-To fetch an object that lives on a different Ion Store node, pass that node's peer id; the bound service fetches and caches it for you. Every `get` form has a federated overload:
+To fetch an object that lives on a different Ion Store node, open the get with `get(peerId, id)`; the bound service fetches and caches it for you. The returned `GetRequest` behaves exactly like the local one — same destinations, same `decrypt(key)`/`raw()`:
 
 ```java
-BytesIonObject obj = store.get(peerId, id).get();
-store.get(peerId, id, Path.of("/tmp/out.bin")).get();
+Optional<BytesIonObject> obj = store.get(peerId, id).toBytes().get();
+store.get(peerId, id).toFile(Path.of("/tmp/out.bin")).get();
 ```
 
 ---
 
 ## API Overview
 
+**Entry points** (`put()` opens a `PutRequest`, `get(...)` a `GetRequest`; both are terminated as shown):
+
 | Method | Returns | Auth | Notes |
 |---|---|---|---|
-| `put(byte[] / Buffer / Path / InputStream / ReadStream, …, PutOptions)` | `IonObject` | yes | Store an object; returns its metadata. |
-| `get(Id [, peerId])` | `BytesIonObject` | no | In-memory, integrity-verified; `null` if absent. |
-| `get(Id [, peerId], Path / OutputStream / WriteStream)` | `IonObject` | no | Streamed; returns metadata. |
-| `getIonObject(Id)` | `IonObject` | no | Metadata only (no payload); `null` if absent. |
+| `put()` | `PutRequest` | yes | Fluent builder; terminated by `send()`. |
+| `get(Id)` / `get(Id peerId, Id)` | `GetRequest` | no | Fluent builder; terminated by a `to*(...)` destination. |
+| `getIonObject(Id)` | `Optional<IonObject>` | no | Metadata only (no payload); empty if absent. |
 | `exists(Id)` | `Boolean` | no | HEAD check. |
 | `list(long page, long pageSize)` | `PaginatedResult<IonObject>` | yes | The caller's objects, newest first. |
 | `delete(Id)` | `Boolean` | yes | `false` if the object did not exist. |
 | `close()` | `Void` | — | Releases the HTTP client. |
+
+**`PutRequest`** — configure, then `send()`:
+
+| Method | Notes |
+|---|---|
+| `content(byte[] / Buffer / Path / InputStream[, closeStream] / ReadStream)` | The payload source (required; a later call replaces an earlier one). |
+| `name(String)`, `contentType(String)`, `ttl(long seconds)` | Object description; all optional. |
+| `contentLength(long)` | Length hint for the stream sources; ignored by array/buffer/file. |
+| `metadata(String, Object)` / `metadata(Map)` | Custom `Ion-*` metadata. |
+| `encrypt(byte[] key)` | Client-side encryption with a `SecretStream.KEY_BYTES`-byte key. |
+| `send()` → `ContextualFuture<IonObject>` | Uploads and completes with the stored metadata. |
+
+**`GetRequest`** — optionally shape, then choose a destination (the destination is the terminal call):
+
+| Method | Notes |
+|---|---|
+| `decrypt(byte[] key)` | Decrypt as it streams; mutually exclusive with `raw()`. |
+| `raw()` | Take the stored bytes verbatim (ciphertext for encrypted objects), still integrity-checked. |
+| `toBytes()` → `Optional<BytesIonObject>` | Into memory, payload included. |
+| `toBuffer(Buffer)` → `Optional<IonObject>` | Append payload to a caller buffer; returns metadata only. |
+| `toFile(Path)` → `Optional<IonObject>` | To a file; removed on failure. |
+| `toOutputStream(OutputStream[, boolean close])` → `Optional<IonObject>` | To a blocking stream; not closed unless requested. |
+| `toWriteStream(WriteStream<Buffer>)` → `Optional<IonObject>` | To a Vert.x write stream (ended on completion). |
 
 Accessors: `getUserId()`, `getDeviceId()`, `getServicePeerId()`, `getServiceUrl()`, `isClosed()`.
 
@@ -247,6 +307,7 @@ Failures surface as [`IonStoreException`](src/main/java/io/bosonnetwork/ionstore
 | `QuotaExceededException` | Storage quota exhausted (HTTP 507) — free space or retry later |
 | `ObjectNotFoundException` | Object absent (HTTP 404) — *not* thrown by `get`/`exists`/`delete`, which return `null`/`false` |
 | `ObjectIntegrityException` | Content-id mismatch on download (or a service-side integrity error, HTTP 422) |
+| `DecryptionException` | Client-side only: the get and the object disagree about encryption (encrypted object fetched without a key, or a key supplied for a plain object), or the ciphertext cannot be framed for decryption. Carries no HTTP status. |
 | `IonStoreIOException`, `MetabaseException`, `IonStoreServerException` | Server-side faults (HTTP 500) |
 | `PeerNotFoundException`, `PeerRequestException`, `PeerResponseException` | Federation faults (HTTP 502) |
 
@@ -256,7 +317,7 @@ Catch the **specific type** rather than branching on the HTTP status: a single s
 
 ```java
 try {
-    store.put(bytes, options).get();
+    store.put().content(bytes).send().get();
 } catch (ExecutionException e) {
     if (e.getCause() instanceof QuotaExceededException qe)
         // free space or retry later
