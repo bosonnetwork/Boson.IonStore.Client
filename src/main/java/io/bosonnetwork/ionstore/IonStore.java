@@ -141,6 +141,17 @@ import io.bosonnetwork.web.PaginatedResult;
  * user id) or by its id directly ({@link Builder#userId}); a device key is required either way. Over
  * HTTPS the service's self-signed certificate is pinned to its peer id.
  *
+ * <h2>Connection reuse</h2>
+ * Connections are pooled and reused, but are held for reuse only briefly: a connection that has gone
+ * idle can be closed by the peer, the network, or - on mobile - the host platform, and nothing detects
+ * that until a request is written into it and the write fails. Expiring pooled connections well inside
+ * that window keeps the common case a fresh connection rather than a dead one.
+ * <p>
+ * <b>No request is ever retried automatically.</b> A transport failure tells us only that no response
+ * arrived - never whether the service received and acted on the request - so retrying is a judgement
+ * the caller is better placed to make: it knows whether repeating the operation is acceptable, and its
+ * retry is visible where a silent one would not be. This applies uniformly, to reads and writes alike.
+ *
  * <h2>Lifecycle &amp; threading</h2>
  * The underlying {@link HttpClient} is created when the client is constructed, so a client is ready
  * to use as soon as it is built; call {@link #close()} when finished to release it. Requests issued
@@ -161,6 +172,9 @@ public class IonStore {
 	// Size threshold for the byte[] put: arrays smaller than this are copied into a single buffer and
 	// sent in one shot; larger arrays are streamed from the array (see put(byte[], PutOptions)).
 	private static final int IN_MEMORY_PUT_THRESHOLD = 1024 * 1024; // 1 MiB
+
+	// Seconds an idle connection may be reused from the pool. See the HttpClientOptions setup.
+	private static final int KEEP_ALIVE_TIMEOUT = 20;
 
 	// Ion-* header names (mirrors the service's IonStoreHeaders; redeclared here to avoid depending
 	// on the service module).
@@ -245,6 +259,14 @@ public class IonStore {
 				.setDefaultHost(host)
 				.setDefaultPort(port)
 				.setKeepAlive(true)
+				// How long an idle connection may be kept in the pool for reuse. Deliberately short:
+				// mobile platforms and NAT gateways silently kill idle sockets after a period of
+				// inactivity, and a pooled connection that died that way is indistinguishable from a
+				// live one until a request is written into it and fails. Expiring the pool well inside
+				// that window means the common case is a fresh connection rather than a dead one.
+				// Expiry is wall-clock, so a connection that sat through a device sleep is already
+				// stale on wake and is evicted rather than handed out.
+				.setKeepAliveTimeout(KEEP_ALIVE_TIMEOUT)
 				.setPipelining(false)            // safer for large streaming responses
 				.setMaxChunkSize(16 * 1024)      // 16 KB chunks (balanced default)
 				.setDecompressionSupported(false) // avoid buffering for transparent decompression
