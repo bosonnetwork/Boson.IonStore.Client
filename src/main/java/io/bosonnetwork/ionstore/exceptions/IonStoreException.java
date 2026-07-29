@@ -25,7 +25,9 @@ package io.bosonnetwork.ionstore.exceptions;
 import java.nio.charset.StandardCharsets;
 
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.json.JsonObject;
+import org.jspecify.annotations.Nullable;
 
 import io.bosonnetwork.BosonException;
 
@@ -130,6 +132,20 @@ public class IonStoreException extends BosonException {
 		this(NO_HTTP_STATUS, message, cause);
 	}
 
+	private static long getRetryAfter(@Nullable HttpClientResponse response) {
+		if (response == null)
+			return 0;
+
+		String value = response.getHeader("Retry-After");
+		if (value == null)
+			return 0;
+		try {
+			return Long.parseLong(value);
+		} catch (NumberFormatException e) {
+			return 0;
+		}
+	}
+
 	/**
 	 * Builds an exception from a service error response, mapping it to the most specific subclass.
 	 * <p>
@@ -145,6 +161,25 @@ public class IonStoreException extends BosonException {
 	 * @return a classified {@code IonStoreException}, or a subclass thereof
 	 */
 	public static IonStoreException fromResponse(int status, Buffer body) {
+		return fromResponse(status, body, null);
+	}
+
+	/**
+	 * Builds an exception from a service error response, mapping it to the most specific subclass.
+	 * The {@code Error} JSON payload is parsed for its {@code type}, {@code code}, and {@code message}
+	 * fields, along with any {@code nested} federation detail, to determine the appropriate exception
+	 * type and construct a developer-friendly message. The nested peer detail, if present, is included
+	 * in the message. The method falls back to the raw response body or a status-derived message when
+	 * the provided body is empty or unstructured. For unrecognized error types, it returns a generic
+	 * {@code IonStoreException} that retains the original numeric code.
+	 *
+	 * @param status   the HTTP status code of the response
+	 * @param body     the response body, which may be {@code null} or empty
+	 * @param response the full HTTP response object, used for extracting additional metadata when needed
+	 * @return a specific {@code IonStoreException} subclass corresponding to the mapped error type, or
+	 *         a generic {@code IonStoreException} if no specific type can be determined
+	 */
+	public static IonStoreException fromResponse(int status, Buffer body, @Nullable HttpClientResponse response) {
 		String type = null;
 		int code = NO_ERROR_CODE;
 		String message = null;
@@ -190,9 +225,12 @@ public class IonStoreException extends BosonException {
 			case IO_ERROR -> new IonStoreIOException(status, displayMessage, nested);
 			case METABASE_ERROR -> new MetabaseException(status, displayMessage, nested);
 			case SERVER_ERROR -> new IonStoreServerException(status, displayMessage, nested);
-			// RATE_LIMITED is reserved and not yet emitted by the service; until it has a dedicated
-			// type it surfaces as a plain IonStoreException that still preserves the numeric code.
-			case RATE_LIMITED, UNKNOWN -> new IonStoreException(status, code, displayMessage, nested);
+			case RATE_LIMITED -> new RateLimitException(status, displayMessage, nested, getRetryAfter(response));
+			case SERVICE_BUSY -> new ServiceBusyException(status, displayMessage, nested, getRetryAfter(response));
+			// Both are retryable-after-a-wait rather than a distinct failure mode to handle, and
+			// neither has a dedicated type yet, so they surface as a plain IonStoreException that
+			// still preserves the numeric code and the HTTP status.
+			case UNKNOWN -> new IonStoreException(status, code, displayMessage, nested);
 		};
 	}
 

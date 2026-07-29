@@ -983,7 +983,7 @@ public class IonStore {
 		int statusCode = response.statusCode();
 		return response.body().transform(ar -> {
 			Buffer body = ar.succeeded() ? ar.result() : null;
-			IonStoreException error = IonStoreException.fromResponse(statusCode, body);
+			IonStoreException error = IonStoreException.fromResponse(statusCode, body, response);
 
 			// Client-correctable conditions (bad request, auth, not found, too large, quota/TTL) are
 			// expected and logged at debug; everything else (5xx, federation faults) at error level.
