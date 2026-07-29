@@ -57,12 +57,18 @@ enum IonStoreError {
 	/** The user's storage quota is exhausted; HTTP {@code 507}. Free space or retry later. */
 	QUOTA_EXCEEDED(23, "Quota limit exceeded"),
 	/**
-	 * Request-rate limit exceeded; HTTP {@code 429}. Reserved for a future service capability; the
-	 * current service does not yet report it, but the code is allocated so clients map it forward.
+	 * Request-rate limit exceeded; HTTP {@code 429}. The caller is out of budget in one of the
+	 * service's rate limit scopes. The response carries a {@code Retry-After} header.
 	 */
 	RATE_LIMITED(24, "Rate limit exceeded"),
 	/** The service detected an object-integrity failure on its side; HTTP {@code 422}. */
 	INTEGRITY_ERROR(25, "Object integrity error"),
+	/**
+	 * The service is at a concurrency cap; HTTP {@code 503}. Unlike {@link #RATE_LIMITED} this says
+	 * nothing about the caller's own budget - the node is simply busy - so the request is worth
+	 * retrying shortly. The response carries a {@code Retry-After} header.
+	 */
+	SERVICE_BUSY(26, "Server busy"),
 
 	/** The federation peer that should hold the object could not be located; HTTP {@code 502}. */
 	PEER_NOT_FOUND(40, "Peer not found"),
