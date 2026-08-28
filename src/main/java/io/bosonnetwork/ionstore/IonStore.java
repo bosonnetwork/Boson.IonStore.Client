@@ -276,7 +276,7 @@ public class IonStore {
 				.setProtocolVersion(HttpVersion.HTTP_1_1);
 
 		if (ssl)
-			options.setEnabledSecureTransportProtocols(Set.of("TLSv1.3"))
+			options.setEnabledSecureTransportProtocols(Set.of("TLSv1.2", "TLSv1.3"))
 					.setTrustOptions(TrustOptions.wrap(
 							new HybridTrustManager(servicePeerId.toString(), servicePeerId.bytesUnsafe())));
 
