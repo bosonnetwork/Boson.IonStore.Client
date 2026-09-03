@@ -243,11 +243,7 @@ public class IonStore {
 		this.host = serviceUrl.getHost();
 		this.port = serviceUrl.getPort() > 0 ? serviceUrl.getPort() : serviceUrl.getDefaultPort();
 
-		String path = serviceUrl.getPath();
-		if (path == null)
-			path = "";
-		if (path.endsWith("/"))
-			path = path.substring(0, path.length() - 1);
+		String path = serviceUrl.getPath().replaceAll("/+$", "");
 		this.basePath = path + API_VERSION_PREFIX;
 
 		PoolOptions poolOptions = new PoolOptions()
