@@ -32,6 +32,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 import io.vertx.core.MultiMap;
@@ -47,7 +48,6 @@ import io.bosonnetwork.Id;
 import io.bosonnetwork.crypto.Hash;
 import io.bosonnetwork.crypto.SecretStream;
 import io.bosonnetwork.crypto.Signature;
-import io.bosonnetwork.vertx.ContextualFuture;
 
 /**
  * Wire-contract tests for the fluent {@link IonStore#put()} API: which headers an upload carries and
@@ -119,7 +119,7 @@ class PutRequestUploadTest {
 	 * routes every payload down that path regardless of size - so this would fail if the resolution
 	 * ran on the caller's thread.
 	 */
-	private IonObject send(Supplier<ContextualFuture<IonObject>> action) throws Exception {
+	private IonObject send(Supplier<CompletableFuture<IonObject>> action) throws Exception {
 		return action.get().get(10, TimeUnit.SECONDS);
 	}
 

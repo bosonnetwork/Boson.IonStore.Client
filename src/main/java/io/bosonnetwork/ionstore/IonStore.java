@@ -40,6 +40,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntFunction;
@@ -156,7 +157,9 @@ import io.bosonnetwork.web.PaginatedResult;
  * The underlying {@link HttpClient} is created when the client is constructed, so a client is ready
  * to use as soon as it is built; call {@link #close()} when finished to release it. Requests issued
  * after {@link #close()} fail with {@link IllegalStateException}. The returned
- * {@link ContextualFuture}s complete on the caller's Vert.x context.
+ * {@link CompletableFuture}s complete on the caller's Vert.x context. A Vert.x caller can turn one
+ * back into a {@link io.vertx.core.Future} with {@code Future.fromCompletionStage}. Cancellation is
+ * not supported: {@code cancel()} returns {@code false} and never stops a request in flight.
  *
  * <p>Instances are obtained through {@link #builder()}.
  */
@@ -322,7 +325,7 @@ public class IonStore {
 	 *
 	 * @return a future completing when the client is closed
 	 */
-	public ContextualFuture<Void> close() {
+	public CompletableFuture<Void> close() {
 		if (closed)
 			return ContextualFuture.succeededFuture();
 
@@ -742,7 +745,7 @@ public class IonStore {
 	 * @param id the object reference id (must not be {@code null})
 	 * @return a future completing with the metadata, or {@code null} if the object was not found
 	 */
-	public ContextualFuture<Optional<IonObject>> getIonObject(Id id) {
+	public CompletableFuture<Optional<IonObject>> getIonObject(Id id) {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 
@@ -777,7 +780,7 @@ public class IonStore {
 	 * @param id the object reference id (must not be {@code null})
 	 * @return a future completing with {@code true} if the object exists, {@code false} otherwise
 	 */
-	public ContextualFuture<Boolean> exists(Id id) {
+	public CompletableFuture<Boolean> exists(Id id) {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 
@@ -803,7 +806,7 @@ public class IonStore {
 	 * @param pageSize the number of items per page (must be {@code >= 1}; clamped server-side)
 	 * @return a future completing with a page of object metadata
 	 */
-	public ContextualFuture<PaginatedResult<IonObject>> list(long page, long pageSize) {
+	public CompletableFuture<PaginatedResult<IonObject>> list(long page, long pageSize) {
 		if (page < 1)
 			throw new IllegalArgumentException("page must be >= 1");
 		if (pageSize < 1)
@@ -848,7 +851,7 @@ public class IonStore {
 	 * @param id the object reference id (must not be {@code null})
 	 * @return a future completing with {@code true} if an object was deleted, {@code false} if none existed
 	 */
-	public ContextualFuture<Boolean> delete(Id id) {
+	public CompletableFuture<Boolean> delete(Id id) {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 

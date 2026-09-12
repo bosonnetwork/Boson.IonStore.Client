@@ -26,6 +26,7 @@ import java.io.OutputStream;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.streams.WriteStream;
@@ -142,7 +143,7 @@ public class GetRequest {
 	 * @return a future completing with the object and its payload, or an empty {@link Optional} if the
 	 *         object was not found
 	 */
-	public ContextualFuture<Optional<BytesIonObject>> toBytes() {
+	public CompletableFuture<Optional<BytesIonObject>> toBytes() {
 		return ContextualFuture.of(store.getToBytes(peerId, id, decryptionKey, raw));
 	}
 
@@ -159,7 +160,7 @@ public class GetRequest {
 	 * @return a future completing with the object metadata, or an empty {@link Optional} if the object
 	 *         was not found
 	 */
-	public ContextualFuture<Optional<IonObject>> toBuffer(Buffer buffer) {
+	public CompletableFuture<Optional<IonObject>> toBuffer(Buffer buffer) {
 		Objects.requireNonNull(buffer, "buffer");
 		return ContextualFuture.of(store.getToBuffer(peerId, id, decryptionKey, raw, buffer));
 	}
@@ -174,7 +175,7 @@ public class GetRequest {
 	 * @return a future completing with the object metadata, or an empty {@link Optional} if the object
 	 *         was not found
 	 */
-	public ContextualFuture<Optional<IonObject>> toFile(Path file) {
+	public CompletableFuture<Optional<IonObject>> toFile(Path file) {
 		Objects.requireNonNull(file, "file");
 		return ContextualFuture.of(store.getToFile(peerId, id, decryptionKey, raw, file));
 	}
@@ -188,7 +189,7 @@ public class GetRequest {
 	 * @return a future completing with the object metadata, or an empty {@link Optional} if the object
 	 *         was not found
 	 */
-	public ContextualFuture<Optional<IonObject>> toOutputStream(OutputStream stream, boolean closeStream) {
+	public CompletableFuture<Optional<IonObject>> toOutputStream(OutputStream stream, boolean closeStream) {
 		Objects.requireNonNull(stream, "stream");
 		return ContextualFuture.of(store.getToOutputStream(peerId, id, decryptionKey, raw, stream, closeStream));
 	}
@@ -201,7 +202,7 @@ public class GetRequest {
 	 * @return a future completing with the object metadata, or an empty {@link Optional} if the object
 	 *         was not found
 	 */
-	public ContextualFuture<Optional<IonObject>> toOutputStream(OutputStream stream) {
+	public CompletableFuture<Optional<IonObject>> toOutputStream(OutputStream stream) {
 		return toOutputStream(stream, false);
 	}
 
@@ -212,7 +213,7 @@ public class GetRequest {
 	 * @return a future completing with the object metadata, or an empty {@link Optional} if the object
 	 *         was not found
 	 */
-	public ContextualFuture<Optional<IonObject>> toWriteStream(WriteStream<Buffer> stream) {
+	public CompletableFuture<Optional<IonObject>> toWriteStream(WriteStream<Buffer> stream) {
 		Objects.requireNonNull(stream, "stream");
 		return ContextualFuture.of(store.getToWriteStream(peerId, id, decryptionKey, raw, stream));
 	}

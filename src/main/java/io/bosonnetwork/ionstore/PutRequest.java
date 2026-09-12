@@ -28,6 +28,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.streams.ReadStream;
@@ -384,7 +385,7 @@ public class PutRequest {
 	 * @return a future completing with the stored object's metadata
 	 * @throws IllegalStateException if no content source was set, or the client is closed
 	 */
-	public ContextualFuture<IonObject> send() {
+	public CompletableFuture<IonObject> send() {
 		if (contentSource == ContentSource.EMPTY)
 			throw new IllegalStateException("No content provided");
 

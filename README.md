@@ -98,7 +98,7 @@ mvn clean package -DskipTests
 
 ## Usage
 
-The client is ready to use as soon as it is built (the underlying `HttpClient` is created in the constructor) — there is no `start()`. Call `close()` when finished. All operations return a `ContextualFuture` (a `CompletableFuture` that completes on the caller's Vert.x context).
+The client is ready to use as soon as it is built (the underlying `HttpClient` is created in the constructor) — there is no `start()`. Call `close()` when finished. All operations return a `CompletableFuture` that completes on the caller’s Vert.x context; a Vert.x caller can convert one back with `Future.fromCompletionStage`. Cancellation is not supported.
 
 ### Create a client
 
@@ -267,7 +267,7 @@ store.get(peerId, id).toFile(Path.of("/tmp/out.bin")).get();
 | `contentLength(long)` | Length hint for the stream sources; ignored by array/buffer/file. |
 | `metadata(String, Object)` / `metadata(Map)` | Custom `Ion-*` metadata. |
 | `encrypt(byte[] key)` | Client-side encryption with a `SecretStream.KEY_BYTES`-byte key. |
-| `send()` → `ContextualFuture<IonObject>` | Uploads and completes with the stored metadata. |
+| `send()` → `CompletableFuture<IonObject>` | Uploads and completes with the stored metadata. |
 
 **`GetRequest`** — optionally shape, then choose a destination (the destination is the terminal call):
 
