@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -67,6 +68,9 @@ class IonStoreClientTest {
 	private final Id badId = Id.random();
 	private final Id missingHeaderId = Id.random();
 	private final Id quotaId = Id.random();
+	private final Id servicePeerId = Id.random();
+
+	private volatile String lastPath;
 
 	private Vertx vertx;
 	private HttpServer server;
@@ -81,6 +85,7 @@ class IonStoreClientTest {
 
 		server = vertx.createHttpServer().requestHandler(req -> {
 			String path = req.path();
+			lastPath = path;
 			String id = path.substring(path.lastIndexOf('/') + 1);
 			HttpServerResponse resp = req.response();
 
@@ -115,7 +120,7 @@ class IonStoreClientTest {
 				.vertx(vertx)
 				.userKey(Signature.KeyPair.random())
 				.deviceKey(Signature.KeyPair.random())
-				.servicePeerId(Id.random())
+				.servicePeerId(servicePeerId)
 				.serviceUrl("http://localhost:" + port)
 				.build();
 	}
@@ -143,6 +148,24 @@ class IonStoreClientTest {
 		assertEquals(PAYLOAD.length, result.getSize());
 		// custom Ion-* header surfaced as metadata
 		assertEquals("greeting.txt", result.getMetadata().get("Ion-Filename"));
+	}
+
+	@Test
+	void anAddressRetrievesLocallyOrFromItsPeer() throws Exception {
+		BytesIonObject local = client.get(URI.create("ions://" + servicePeerId + "/" + goodId)).toBytes()
+				.get(5, TimeUnit.SECONDS).orElseThrow();
+		assertEquals("/v1/objects/" + goodId, lastPath);
+		assertEquals("ions://" + servicePeerId + "/" + goodId, local.getUri());
+
+		Id peerId = Id.random();
+		BytesIonObject remote = client.get(URI.create("ions://" + peerId + "/" + goodId)).toBytes()
+				.get(5, TimeUnit.SECONDS).orElseThrow();
+		assertEquals("/v1/objects/" + peerId + "/" + goodId, lastPath);
+		assertEquals("ions://" + peerId + "/" + goodId, remote.getUri());
+
+		for (String bad : new String[] { "https://" + peerId + "/" + goodId, "ions://" + peerId,
+				"ions://" + peerId + "/" + goodId + "/x", "ions://" + peerId + "/" + goodId + "?x=1", "ions://x/y" })
+			assertThrows(IllegalArgumentException.class, () -> client.get(URI.create(bad)), bad);
 	}
 
 	@Test

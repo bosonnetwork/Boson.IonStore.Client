@@ -26,6 +26,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -186,6 +187,9 @@ public class IonStore {
 	private static final String ION_ENCRYPTED = "Ion-Encrypted";
 	private static final String ION_EXPIRE_AT = "Ion-Expire-At";
 	private static final String ION_CONTENT_ID = "Ion-Content-Id";
+
+	// The scheme of an object address: ions://<peerId>/<id>.
+	private static final String ION_URI_SCHEME = "ions";
 
 	/**
 	 * Describes how a client-encrypted payload is framed, so a reader can decrypt it without having
@@ -578,6 +582,39 @@ public class IonStore {
 		return new GetRequest(this, peerId, id);
 	}
 
+	/**
+	 * Starts a retrieval of the object an {@code ions://<peerId>/<id>} address names - the form
+	 * {@link IonObject#getUri()} returns. An object held by the bound service is retrieved as
+	 * {@link #get(Id)} does, and any other as a federated object ({@link #get(Id, Id)}).
+	 *
+	 * @param uri the object address (must not be {@code null})
+	 * @return a retrieval request to configure and dispatch
+	 * @throws IllegalArgumentException if the address is not an {@code ions://<peerId>/<id>} URI
+	 */
+	public GetRequest get(URI uri) {
+		Objects.requireNonNull(uri, "uri");
+		if (!ION_URI_SCHEME.equalsIgnoreCase(uri.getScheme()))
+			throw new IllegalArgumentException("Not an " + ION_URI_SCHEME + ":// address: " + uri);
+
+		// The peer id is the authority; the path is the object id, and nothing else.
+		String authority = uri.getRawAuthority();
+		String path = uri.getRawPath();
+		if (authority == null || path == null || !path.startsWith("/") || path.indexOf('/', 1) >= 0 ||
+				uri.getRawQuery() != null || uri.getRawFragment() != null)
+			throw new IllegalArgumentException("Not an " + ION_URI_SCHEME + "://<peerId>/<id> address: " + uri);
+
+		Id peerId;
+		Id id;
+		try {
+			peerId = Id.of(authority);
+			id = Id.of(path.substring(1));
+		} catch (IllegalArgumentException e) {
+			throw new IllegalArgumentException("Invalid peer or object id in " + uri, e);
+		}
+
+		return peerId.equals(servicePeerId) ? get(id) : get(peerId, id);
+	}
+
 	// The entry points behind GetRequest's destinations. Each one owns the setup its destination needs
 	// and then hands off to the single download() below, which is where the wire protocol - integrity
 	// check included - lives.
@@ -735,7 +772,7 @@ public class IonStore {
 				metadata.put(e.getKey(), e.getValue());
 		});
 
-		String uri = "ions://" + ownerPeerId + "/" + id;
+		String uri = ION_URI_SCHEME + "://" + ownerPeerId + "/" + id;
 		return new IonObject(id, contentId, name, size, contentType, encrypted, expireAt, metadata, uri);
 	}
 
