@@ -321,8 +321,8 @@ class GetRequestDownloadTest {
 
 		ExecutionException e = assertThrows(ExecutionException.class,
 				() -> client.get(id).decrypt(randomKey()).toBytes().get(TIMEOUT, TimeUnit.SECONDS));
-		assertInstanceOf(IonStoreException.class, e.getCause(),
-				"a decryption failure must not escape the package's exception hierarchy");
+		assertInstanceOf(DecryptionException.class, e.getCause(),
+				"a wrong key is a decryption failure, not a transport one");
 	}
 
 	@Test

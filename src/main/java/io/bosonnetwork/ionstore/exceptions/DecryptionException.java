@@ -24,16 +24,20 @@ package io.bosonnetwork.ionstore.exceptions;
 
 /**
  * Thrown when a retrieval cannot deliver the plaintext the caller asked for: the request and the
- * stored object disagree about encryption, or the object cannot be framed for decryption.
+ * stored object disagree about encryption, the object cannot be framed for decryption, or the
+ * ciphertext does not decrypt with the key.
  * <p>
- * This is a client-side condition, raised before any payload is delivered, so it always carries
- * {@link #NO_HTTP_STATUS} and {@link #NO_ERROR_CODE} - the service never reports it. It covers:
+ * This is a client-side condition, so it always carries {@link #NO_HTTP_STATUS} and
+ * {@link #NO_ERROR_CODE} - the service never reports it. It covers:
  * <ul>
  *   <li>an encrypted object retrieved without a decryption key (and without asking for the stored
  *       bytes as-is);</li>
  *   <li>a decryption key supplied for an object that is not encrypted;</li>
  *   <li>an encryption descriptor naming a scheme this client does not implement, or carrying a chunk
- *       size that is missing, malformed, or too small to hold an authentication tag.</li>
+ *       size that is missing, malformed, or too small to hold an authentication tag;</li>
+ *   <li>ciphertext that fails authentication - a wrong key, or tampered or truncated data. This is
+ *       found while the payload streams, so a destination that cannot be rolled back may already
+ *       have received part of it.</li>
  * </ul>
  * <p>
  * It is deliberately distinct from {@code ObjectIntegrityException}: that one means the bytes are not
@@ -50,5 +54,15 @@ public class DecryptionException extends IonStoreException {
 	 */
 	public DecryptionException(String message) {
 		super(NO_HTTP_STATUS, message);
+	}
+
+	/**
+	 * Creates a decryption exception with no HTTP status, for a failure of the decryption itself.
+	 *
+	 * @param message the detail message
+	 * @param cause   what the decryption failed with
+	 */
+	public DecryptionException(String message, Throwable cause) {
+		super(NO_HTTP_STATUS, message, cause);
 	}
 }

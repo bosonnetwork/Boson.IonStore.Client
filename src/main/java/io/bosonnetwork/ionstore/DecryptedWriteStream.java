@@ -30,7 +30,9 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.streams.WriteStream;
 import org.jspecify.annotations.Nullable;
 
+import io.bosonnetwork.crypto.CryptoException;
 import io.bosonnetwork.crypto.SecretStream;
+import io.bosonnetwork.ionstore.exceptions.DecryptionException;
 
 /**
  * A Vert.x {@link WriteStream} wrapper that decrypts encrypted data and writes the
@@ -141,8 +143,9 @@ public class DecryptedWriteStream implements WriteStream<Buffer> {
             }
             return lastWrite;
         } catch (Throwable t) {
-            handleError(t);
-            return Future.failedFuture(t);
+            Throwable failure = decryptionFailure(t);
+            handleError(failure);
+            return Future.failedFuture(failure);
         }
     }
 
@@ -176,9 +179,18 @@ public class DecryptedWriteStream implements WriteStream<Buffer> {
             closeStream();
             return delegate.end();
         } catch (Throwable t) {
-            handleError(t);
-            return Future.failedFuture(t);
+            Throwable failure = decryptionFailure(t);
+            handleError(failure);
+            return Future.failedFuture(failure);
         }
+    }
+
+    // What the decryption itself refuses - a wrong key, tampered or truncated ciphertext, a bad header -
+    // is reported as a decryption failure, so that a caller can tell it from a transport failure.
+    private static Throwable decryptionFailure(Throwable t) {
+        if (t instanceof IllegalStateException || t instanceof IllegalArgumentException || t instanceof CryptoException)
+            return new DecryptionException("Cannot decrypt the object: " + t.getMessage(), t);
+        return t;
     }
 
     @Override
