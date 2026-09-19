@@ -159,8 +159,7 @@ import io.bosonnetwork.web.PaginatedResult;
  * to use as soon as it is built; call {@link #close()} when finished to release it. Requests issued
  * after {@link #close()} fail with {@link IllegalStateException}. The returned
  * {@link CompletableFuture}s complete on the caller's Vert.x context. A Vert.x caller can turn one
- * back into a {@link io.vertx.core.Future} with {@code Future.fromCompletionStage}. Cancellation is
- * not supported: {@code cancel()} returns {@code false} and never stops a request in flight.
+ * back into a {@link io.vertx.core.Future} with {@code Future.fromCompletionStage}.
  *
  * <p>Instances are obtained through {@link #builder()}.
  */

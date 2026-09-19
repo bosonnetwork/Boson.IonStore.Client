@@ -119,7 +119,7 @@ The native jars must match the Netty version on the class path. See [Native Tran
 
 ## Usage
 
-The client is ready to use as soon as it is built (the underlying `HttpClient` is created in the constructor) — there is no `start()`. Call `close()` when finished. All operations return a `CompletableFuture` that completes on the caller’s Vert.x context; a Vert.x caller can convert one back with `Future.fromCompletionStage`. Cancellation is not supported.
+The client is ready to use as soon as it is built (the underlying `HttpClient` is created in the constructor) — there is no `start()`. Call `close()` when finished. All operations return a `CompletableFuture` that completes on the caller’s Vert.x context; a Vert.x caller can convert one back with `Future.fromCompletionStage`. The futures follow the `CompletableFuture` contract: `cancel()`, `complete()` and the timeouts complete the future, though a request in flight is not stopped.
 
 ### Create a client
 
