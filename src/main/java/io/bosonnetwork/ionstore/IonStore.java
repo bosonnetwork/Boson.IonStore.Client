@@ -33,7 +33,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -57,6 +56,7 @@ import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
+import io.vertx.core.http.HttpHeaders;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.PoolOptions;
@@ -92,7 +92,10 @@ import io.bosonnetwork.vertx.BufferWriteStream;
 import io.bosonnetwork.vertx.ByteArrayReadStream;
 import io.bosonnetwork.vertx.ContextualFuture;
 import io.bosonnetwork.vertx.ObservableReadStream;
+import io.bosonnetwork.web.HttpDate;
 import io.bosonnetwork.web.PaginatedResult;
+import io.bosonnetwork.web.client.AccessTokenSource;
+import io.bosonnetwork.web.client.SelfIssuedAccessTokens;
 
 /**
  * A streaming client for a Boson Ion Store service: a content-addressed, deduplicated binary object
@@ -164,8 +167,6 @@ import io.bosonnetwork.web.PaginatedResult;
  * <p>Instances are obtained through {@link #builder()}.
  */
 public class IonStore {
-	private static final long ACCESS_TOKEN_TIMEOUT = 10 * 60 * 1000;
-
 	// current supported API version prefix
 	private static final String API_VERSION_PREFIX = "/v1";
 
@@ -227,13 +228,11 @@ public class IonStore {
 	private final String basePath;
 
 	private final HttpClient httpClient;
-	private volatile @Nullable AccessTokenCache tokenCache;
+	private final AccessTokenSource tokens;
 
 	private volatile boolean closed;
 
 	private static final Logger log = LoggerFactory.getLogger(IonStore.class);
-
-	private record AccessTokenCache(String token, long createdAt) {}
 
 	private IonStore(Builder builder) {
 		this.vertx = Objects.requireNonNull(builder.vertx, "Vert.x instance must be set");
@@ -244,6 +243,16 @@ public class IonStore {
 
 		this.servicePeerId = Objects.requireNonNull(builder.servicePeerId, "servicePeerId must be set");
 		this.serviceUrl = Objects.requireNonNull(builder.serviceUrl, "serviceUrl must be set");
+
+		// The device signs its own short-lived tokens on behalf of the user, bound to this service, and
+		// dates them by the service's clock if a refusal shows ours to be off.
+		this.tokens = SelfIssuedAccessTokens.builder(deviceIdentity)
+				.subject(userId)
+				.clientId(deviceIdentity.getId())
+				.scope(AccessScope.CLIENT)
+				.audience(servicePeerId)
+				.logger(log)
+				.build();
 
 		boolean ssl = serviceUrl.getProtocol().equals("https");
 		this.host = serviceUrl.getHost();
@@ -374,11 +383,13 @@ public class IonStore {
 		md.update(content.getBytes());
 		Id expectedContentId = Id.of(md.digest());
 
-		return httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
-				.compose(request -> {
-					applyUploadHeaders(request, options);
-					return request.send(content);
-				})
+		return tokens.token()
+				.compose(token -> httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
+						.compose(request -> {
+							applyUploadHeaders(request, options, token);
+							return request.send(content);
+						})
+						.compose(response -> noteRefusal(response, token)))
 				.compose(this::handleUploadResponse)
 				.compose(obj -> verifyUploadedContentId(obj, expectedContentId))
 				.recover(IonStore::wrapError);
@@ -390,11 +401,13 @@ public class IonStore {
 		// a valid-looking but broken object. Symmetric to the download-side integrity check.
 		MessageDigest md = Hash.sha256();
 		ReadStream<Buffer> observed = new ObservableReadStream<>(stream, buf -> md.update(buf.getBytes()));
-		return httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
-				.compose(request -> {
-					applyUploadHeaders(request, options);
-					return request.send(observed);
-				})
+		return tokens.token()
+				.compose(token -> httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
+						.compose(request -> {
+							applyUploadHeaders(request, options, token);
+							return request.send(observed);
+						})
+						.compose(response -> noteRefusal(response, token)))
 				.compose(this::handleUploadResponse)
 				.compose(obj -> verifyUploadedContentId(obj, Id.of(md.digest())))
 				.recover(IonStore::wrapError);
@@ -498,8 +511,8 @@ public class IonStore {
 		return options.encryptionKey() == null ? CHUNK_SIZE : CHUNK_SIZE_FOR_ENCRYPTION;
 	}
 
-	private void applyUploadHeaders(HttpClientRequest request, PutRequest options) {
-		request.putHeader("Authorization", "Bearer " + getAccessToken());
+	private void applyUploadHeaders(HttpClientRequest request, PutRequest options, String token) {
+		request.putHeader("Authorization", "Bearer " + token);
 		request.putHeader("Content-Type", options.contentType() != null ?
 				options.contentType() : "application/octet-stream");
 		String name = options.name();
@@ -850,11 +863,7 @@ public class IonStore {
 		closedCheck();
 
 		String uri = uri("/objects") + "?page=" + page + "&pageSize=" + pageSize;
-		Future<PaginatedResult<IonObject>> future = httpClient.request(requestOptions(HttpMethod.GET, uri))
-				.compose(request -> {
-					request.putHeader("Authorization", "Bearer " + getAccessToken());
-					return request.send();
-				})
+		Future<PaginatedResult<IonObject>> future = sendAuthenticated(HttpMethod.GET, uri)
 				.compose(response -> {
 					if (response.statusCode() == 200) {
 						return response.body().compose(buf -> {
@@ -891,11 +900,7 @@ public class IonStore {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 
-		Future<Boolean> future = httpClient.request(requestOptions(HttpMethod.DELETE, uri("/objects/" + id)))
-				.compose(request -> {
-					request.putHeader("Authorization", "Bearer " + getAccessToken());
-					return request.send();
-				})
+		Future<Boolean> future = sendAuthenticated(HttpMethod.DELETE, uri("/objects/" + id))
 				.compose(response -> {
 					if (response.statusCode() == 204)
 						return response.body().map(b -> true);
@@ -922,24 +927,37 @@ public class IonStore {
 				.setFollowRedirects(false);
 	}
 
-	private String getAccessToken() {
-		AccessTokenCache tc = tokenCache;
-		if (tc == null || System.currentTimeMillis() - tc.createdAt > ACCESS_TOKEN_TIMEOUT) {
-			SignedCwt.Builder builder = SignedCwt.builder(deviceIdentity)
-					.subject(userId)
-					.audience(servicePeerId)
-					.expiration(Duration.ofMillis(ACCESS_TOKEN_TIMEOUT + 1000 * 60))
-					.notBeforeNow()
-					.issuedAtNow()
-					.scope(AccessScope.CLIENT.toString())
-					.clientId(deviceIdentity.getId());
+	// Sends an authenticated request, and repeats it once if the service refuses the token and the
+	// token source says another would do better - which is how a client clock too far from the
+	// service's own rights itself. Only for requests that can be repeated: an upload cannot, since its
+	// payload has been streamed away by the time the answer arrives (see noteRefusal).
+	private Future<HttpClientResponse> sendAuthenticated(HttpMethod method, String uri) {
+		return tokens.token()
+				.compose(token -> send(method, uri, token)
+						.compose(response -> !refused(response, token) ? Future.succeededFuture(response) :
+								tokens.token().compose(fresh -> send(method, uri, fresh))));
+	}
 
-			String token = builder.buildToString();
-			tc = new AccessTokenCache(token, System.currentTimeMillis());
-			tokenCache = tc;
-		}
+	private Future<HttpClientResponse> send(HttpMethod method, String uri, String token) {
+		return httpClient.request(requestOptions(method, uri))
+				.compose(request -> {
+					request.putHeader("Authorization", "Bearer " + token);
+					return request.send();
+				});
+	}
 
-		return tc.token;
+	// Whether the answer is a refusal of the token that another token could survive. Told either way,
+	// the token source learns the service's clock from the refusal.
+	private boolean refused(HttpClientResponse response, String token) {
+		return response.statusCode() == 401 &&
+				tokens.rejected(token, HttpDate.parse(response.getHeader(HttpHeaders.DATE)));
+	}
+
+	// An upload is not repeated - its payload is gone - but the refusal is still reported, so that a
+	// clock correction it carries is in place for the next one.
+	private Future<HttpClientResponse> noteRefusal(HttpClientResponse response, String token) {
+		refused(response, token);
+		return Future.succeededFuture(response);
 	}
 
 	// Server-managed Ion-* headers; mirrors the service's IonStoreHeaders.isReserved. Used on both
