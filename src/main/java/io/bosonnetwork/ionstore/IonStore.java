@@ -170,7 +170,16 @@ public class IonStore {
 	// current supported API version prefix
 	private static final String API_VERSION_PREFIX = "/v1";
 
+	/**
+	 * The transfer chunk size in bytes: the read-ahead applied to a payload source, and, for an
+	 * encrypted put, the size a full ciphertext block is framed to.
+	 */
 	protected static final int CHUNK_SIZE = 32 * 1024;
+
+	/**
+	 * The plaintext chunk size that encrypts to exactly {@link #CHUNK_SIZE} ciphertext bytes: a
+	 * ciphertext block carries the {@link SecretStream} authentication tag on top of its plaintext.
+	 */
 	protected static final int CHUNK_SIZE_FOR_ENCRYPTION = CHUNK_SIZE - SecretStream.ABYTES;
 
 	// Size threshold for the byte[] put: arrays smaller than this are copied into a single buffer and
@@ -346,6 +355,12 @@ public class IonStore {
 	}
 
 
+	/**
+	 * Whether this client has been closed.
+	 *
+	 * @return {@code true} if {@link #close()} has been called; requests issued afterwards fail with
+	 *         {@link IllegalStateException}
+	 */
 	public boolean isClosed() {
 		return closed;
 	}
@@ -372,6 +387,14 @@ public class IonStore {
 		return promise.future();
 	}
 
+	/**
+	 * Starts an object upload.
+	 * <p>
+	 * The returned {@link PutRequest} names a payload source, may carry a name, content type, TTL,
+	 * custom metadata and a client-side encryption key, and is dispatched by {@link PutRequest#send()}.
+	 *
+	 * @return an upload request to configure and send
+	 */
 	public PutRequest put() {
 		return new PutRequest(this);
 	}
@@ -792,7 +815,8 @@ public class IonStore {
 	 * Retrieves an object's metadata without downloading its payload.
 	 *
 	 * @param id the object reference id (must not be {@code null})
-	 * @return a future completing with the metadata, or {@code null} if the object was not found
+	 * @return a future completing with the metadata, or an empty {@link Optional} if the object was
+	 *         not found
 	 */
 	public CompletableFuture<Optional<IonObject>> getIonObject(Id id) {
 		Objects.requireNonNull(id, "id");

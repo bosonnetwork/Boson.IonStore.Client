@@ -22,9 +22,19 @@
 
 package io.bosonnetwork.ionstore.exceptions;
 
+/**
+ * Thrown when the service is at a concurrency cap; HTTP {@code 503}. Unlike
+ * {@link RateLimitException} this says nothing about the caller's own budget - the node is simply
+ * busy - so the request is worth retrying shortly, after {@link #getRetryAfter()} seconds when the
+ * service advertises one.
+ */
 public class ServiceBusyException extends IonStoreException {
 	private static final long serialVersionUID = -6346281147693382900L;
 
+	/**
+	 * The number of seconds to wait before retrying the request, or {@code 0} if the response
+	 * carried no {@code Retry-After} header.
+	 */
 	private final long retryAfter; // seconds
 
 	/**

@@ -78,8 +78,13 @@ public class IonStoreException extends BosonException {
 	 */
 	public static final int NO_ERROR_CODE = -1;
 
+	/** The HTTP status code returned by the service, or {@link #NO_HTTP_STATUS} if there was none. */
 	private final int status;
+
+	/** The stable numeric error code reported by the service, or {@link #NO_ERROR_CODE}. */
 	private final int code;
+
+	/** A description of the nested federation error, or {@code null} if the failure has none. */
 	private final String nested;
 
 	/**

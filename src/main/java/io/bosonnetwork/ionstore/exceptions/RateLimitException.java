@@ -22,9 +22,18 @@
 
 package io.bosonnetwork.ionstore.exceptions;
 
+/**
+ * Thrown when the caller is out of budget in one of the service's rate-limit scopes; HTTP
+ * {@code 429}. The request is worth retrying after {@link #getRetryAfter()} seconds, when the
+ * service advertises one.
+ */
 public class RateLimitException extends IonStoreException {
 	private static final long serialVersionUID = -8131044289523766712L;
 
+	/**
+	 * The number of seconds to wait before retrying the request, or {@code 0} if the response
+	 * carried no {@code Retry-After} header.
+	 */
 	private final long retryAfter; // seconds
 
 	/**

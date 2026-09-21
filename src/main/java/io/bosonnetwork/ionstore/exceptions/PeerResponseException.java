@@ -33,7 +33,10 @@ package io.bosonnetwork.ionstore.exceptions;
 public class PeerResponseException extends IonStoreException {
 	private static final long serialVersionUID = 7352025968333796396L;
 
+	/** The HTTP status the remote peer returned, or {@link #NO_HTTP_STATUS} if the service reported none. */
 	private final int peerStatus;
+
+	/** The message the remote peer returned, or {@code null} if the service reported none. */
 	private final String peerMessage;
 
 	/**

@@ -23,7 +23,7 @@
 package io.bosonnetwork.ionstore.exceptions;
 
 /**
- * Thrown when the user's storage quota is exhausted; HTTP {@code 429}. Free up space (by deleting
+ * Thrown when the user's storage quota is exhausted; HTTP {@code 507}. Free up space (by deleting
  * objects or letting them expire) or retry later.
  */
 public class QuotaExceededException extends IonStoreException {
