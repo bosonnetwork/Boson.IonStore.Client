@@ -407,7 +407,7 @@ public class IonStore {
 		Id expectedContentId = Id.of(md.digest());
 
 		return tokens.token()
-				.compose(token -> httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
+				.compose(token -> request(requestOptions(HttpMethod.POST, uri("/objects")))
 						.compose(request -> {
 							applyUploadHeaders(request, options, token);
 							return request.send(content);
@@ -425,7 +425,7 @@ public class IonStore {
 		MessageDigest md = Hash.sha256();
 		ReadStream<Buffer> observed = new ObservableReadStream<>(stream, buf -> md.update(buf.getBytes()));
 		return tokens.token()
-				.compose(token -> httpClient.request(requestOptions(HttpMethod.POST, uri("/objects")))
+				.compose(token -> request(requestOptions(HttpMethod.POST, uri("/objects")))
 						.compose(request -> {
 							applyUploadHeaders(request, options, token);
 							return request.send(observed);
@@ -719,7 +719,7 @@ public class IonStore {
 		Id ownerPeerId = peerId == null ? servicePeerId : peerId;
 		String uri = peerId == null ? uri("/objects/" + id) : uri("/objects/" + peerId + "/" + id);
 
-		return httpClient.request(requestOptions(HttpMethod.GET, uri))
+		return request(requestOptions(HttpMethod.GET, uri))
 				.compose(HttpClientRequest::send)
 				.compose(response -> {
 					int statusCode = response.statusCode();
@@ -822,7 +822,7 @@ public class IonStore {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 
-		Future<Optional<IonObject>> future = httpClient.request(requestOptions(HttpMethod.GET, uri("/objects/" + id)))
+		Future<Optional<IonObject>> future = request(requestOptions(HttpMethod.GET, uri("/objects/" + id)))
 				.compose(request -> {
 					request.putHeader("Accept", "application/json");
 					return request.send();
@@ -857,7 +857,7 @@ public class IonStore {
 		Objects.requireNonNull(id, "id");
 		closedCheck();
 
-		Future<Boolean> future = httpClient.request(requestOptions(HttpMethod.HEAD, uri("/objects/" + id)))
+		Future<Boolean> future = request(requestOptions(HttpMethod.HEAD, uri("/objects/" + id)))
 				.compose(HttpClientRequest::send)
 				.compose(response -> {
 					if (response.statusCode() == 200)
@@ -962,8 +962,14 @@ public class IonStore {
 								tokens.token().compose(fresh -> send(method, uri, fresh))));
 	}
 
+	// Every request is issued from a Vert.x thread, where the host lookup may block: see
+	// ContextualFuture.callOnVertxThread.
+	private Future<HttpClientRequest> request(RequestOptions options) {
+		return ContextualFuture.callOnVertxThread(vertx, () -> httpClient.request(options));
+	}
+
 	private Future<HttpClientResponse> send(HttpMethod method, String uri, String token) {
-		return httpClient.request(requestOptions(method, uri))
+		return request(requestOptions(method, uri))
 				.compose(request -> {
 					request.putHeader("Authorization", "Bearer " + token);
 					return request.send();
